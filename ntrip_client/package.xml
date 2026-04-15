@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>ntrip_client</name>
-  <version>2.0.1</version>
-  <description>The ntrip client for the anello_ros_driver package</description>
+  <version>3.0.0</version>
+  <description>NTRIP client for the ANELLO ROS2 driver</description>
   <maintainer email="austin.johnson@anellophotonics.com">Austin Johnson</maintainer>
   <license>MIT</license>
 
@@ -10,8 +10,12 @@
   <depend>std_msgs</depend>
   <depend>nmea_msgs</depend>
   <depend>mavros_msgs</depend>
-  
-  <!-- The export tag contains other, unspecified, tags -->
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
   <export>
     <build_type>ament_python</build_type>
   </export>

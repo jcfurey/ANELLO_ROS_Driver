@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>anello_ros_driver</name>
-  <version>2.0.1</version>
-  <description>The anello_ros_driver package</description>
+  <version>3.0.0</version>
+  <description>ROS2 driver for ANELLO Photonics GNSS/INS devices</description>
   <maintainer email="austin.johnson@anellophotonics.com">Austin Johnson</maintainer>
   <license>MIT</license>
   <author email="austin.johnson@anellophotonics.com">Austin Johnson</author>
@@ -10,13 +10,22 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
-  <depend>nmea_msgs</depend>
-  <depend>mavros_msgs</depend>
+  <depend>rclcpp_components</depend>
   <depend>anello_interfaces</depend>
   <depend>sensor_msgs</depend>
-  <!-- Needs this to for the package to show up -->
-  <export>                               
-    <build_type>ament_cmake</build_type> 
-  </export> 
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nmea_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>diagnostic_updater</depend>
 
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

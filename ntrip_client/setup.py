@@ -6,7 +6,7 @@ package_name = 'ntrip_client'
 
 setup(
     name=package_name,
-    version='1.2.0',
+    version='3.0.0',
     packages=find_packages(where='src'),
     package_dir={'': 'src'},
     data_files=[
@@ -17,9 +17,10 @@ setup(
     zip_safe=True,
     maintainer='Austin Johnson',
     maintainer_email='austin.johnson@anellophotonics.com',
-    keywords=['ROS'],
-    description='The ntrip client for the anello_ros_driver package',
+    keywords=['ROS2', 'NTRIP', 'GNSS'],
+    description='NTRIP client for the ANELLO ROS2 driver',
     license='MIT License',
+    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'ntrip_ros = ntrip_client.ntrip_ros:main',

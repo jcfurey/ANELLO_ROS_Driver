@@ -6,8 +6,6 @@
  * Date:        7/12/24
  *
  * License:     MIT License
- *
- * Note:        
  ********************************************************************************/
 
 #include "../main_anello_ros_driver.h"
@@ -21,63 +19,42 @@
 #include <sys/ioctl.h>
 #include <dirent.h>
 #include <vector>
+#include <stdexcept>
 
 #include "anello_data_port.h"
 
-anello_data_port::anello_data_port(const interface_config_t *config) : uart_port(), ethernet_port(config->remote_ip, 1, config->local_data_port)
+anello_data_port::anello_data_port(const interface_config_t *config)
+    : uart_port(),
+      ethernet_port(config->remote_ip, 1, config->local_data_port)
 {
-    this->config.type = config->type;
-    this->config.data_port_name = config->data_port_name;
-    this->config.config_port_name = config->config_port_name;
-    this->config.remote_ip = config->remote_ip;
-    this->config.local_data_port = config->local_data_port;
-    this->config.local_config_port = config->local_config_port;
-    this->config.local_odometer_port = config->local_odometer_port;
-    this->config.baud_rate = config->baud_rate;
-
+    this->config = *config;
     this->decode_success = false;
     this->port_index = 0;
     this->fail_count = 0;
 
-    // get all /dev/ttyUSB* ports
+    // Enumerate available serial ports
     DIR *dir = opendir(PORT_DIR);
-    if (nullptr == dir)
+    if (dir != nullptr)
     {
-        ERROR_PRINT("Failed to open port directory");
-        exit(1);
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr)
-    {
-        std::string temp_port_name = PORT_DIR;
-        if (strncmp(entry->d_name, PORT_PREFIX, strlen(PORT_PREFIX)) == 0)
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != nullptr)
         {
-            // port_name = PORT_DIR;
-            temp_port_name += entry->d_name;
-            port_names.push_back(temp_port_name);
+            std::string temp_port_name = PORT_DIR;
+            if (strncmp(entry->d_name, PORT_PREFIX, strlen(PORT_PREFIX)) == 0)
+            {
+                temp_port_name += entry->d_name;
+                port_names.push_back(temp_port_name);
+            }
         }
+        closedir(dir);
     }
-    closedir(dir);
 
-    //check for auto-detect
-    if (strcmp(this->config.data_port_name.c_str(), "AUTO") == 0)
-    {
-#if DEBUG_SERIAL
-        DEBUG_PRINT("Auto detect data port enabled");
-#endif
-        this->auto_detect = true;
-    }
-    else
-    {
-        this->auto_detect = false;
-    }
+    this->auto_detect = (this->config.data_port_name == "AUTO");
 }
 
 anello_data_port::~anello_data_port()
 {
-    this->ethernet_port.~ethernet_interface();
-    this->uart_port.~serial_interface();
+    // Members are destroyed automatically — no manual destructor calls
 }
 
 void anello_data_port::init()
@@ -86,9 +63,11 @@ void anello_data_port::init()
     {
         this->init_ethernet();
     }
-    else if (this->auto_detect) {
+    else if (this->auto_detect)
+    {
         this->init_uart();
     }
+    else
     {
         this->uart_port.init(this->config.data_port_name, this->config.baud_rate);
     }
@@ -98,13 +77,16 @@ void anello_data_port::init_uart()
 {
     if (this->auto_detect)
     {
-        /**/
+        if (port_names.empty())
+        {
+            throw std::runtime_error("No serial ports found for auto-detection");
+        }
+        if (this->port_index >= this->port_names.size())
+        {
+            this->port_index = 0;
+        }
         this->config.data_port_name = this->port_names[this->port_index];
     }
-
-#if DEBUG_SERIAL
-    DEBUG_PRINT("Data: Trying port %s", this->uart_port.get_portname().c_str());
-#endif
 
     this->uart_port.init(this->config.data_port_name, this->config.baud_rate);
 }
@@ -117,49 +99,38 @@ void anello_data_port::init_ethernet()
 void anello_data_port::port_parse_fail()
 {
     if (this->config.type == ETH)
-    {
         this->port_parse_fail_ethernet();
-    }
     else
-    {
         this->port_parse_fail_uart();
-    }
 }
 
 void anello_data_port::port_parse_fail_uart()
 {
-    //exit if auto detect is off or decode success is true
     if (this->decode_success || !this->auto_detect || !this->uart_port.get_port_enabled())
     {
         return;
     }
 
-#if DEBUG_SERIAL
-    DEBUG_PRINT("Data: Failed to parse data on port %s", this->uart_port.get_portname().c_str());
-#endif
-
     this->fail_count++;
-    
-    //move on to next port
-    //if max fail count is reached
+
     if (MAX_PORT_PARSE_FAIL < this->fail_count)
     {
-        //reset fail count
         this->fail_count = 0;
-
-        //move to next port
         this->port_index++;
         if (this->port_index >= this->port_names.size())
         {
             this->port_index = 0;
         }
 
-        //set port name
         this->config.data_port_name = this->port_names[this->port_index];
-
-        //reset port
         this->uart_port.close_port();
-        this->uart_port.init(this->config.data_port_name, this->config.baud_rate);
+
+        try {
+            this->uart_port.init(this->config.data_port_name, this->config.baud_rate);
+        } catch (const std::exception &e) {
+            WARNING_PRINT("Failed to open port %s: %s",
+                          this->config.data_port_name.c_str(), e.what());
+        }
     }
 }
 
@@ -171,30 +142,18 @@ void anello_data_port::port_parse_fail_ethernet()
 void anello_data_port::port_confirm()
 {
     if (this->config.type == ETH)
-    {
         this->port_confirm_ethernet();
-    }
     else
-    {
         this->port_confirm_uart();
-    }
 }
 
 void anello_data_port::port_confirm_uart()
 {
-    //reset fail count
     this->fail_count = 0;
-    if (this->decode_success)
-    {
-        return;
-    }
+    if (this->decode_success) return;
 
-    //set decode success
     this->decode_success = true;
-
-#if DEBUG_SERIAL
-    DEBUG_PRINT("Data: Confirmed port %s", this->uart_port.get_portname().c_str());
-#endif
+    DEBUG_PRINT("Data port confirmed: %s", this->uart_port.get_portname().c_str());
 }
 
 void anello_data_port::port_confirm_ethernet()
@@ -205,13 +164,9 @@ void anello_data_port::port_confirm_ethernet()
 size_t anello_data_port::get_data(char *buf, size_t buf_len)
 {
     if (this->config.type == ETH)
-    {
         return this->get_data_ethernet(buf, buf_len);
-    }
     else
-    {
         return this->get_data_uart(buf, buf_len);
-    }
 }
 
 size_t anello_data_port::get_data_uart(char *buf, size_t buf_len)
@@ -222,7 +177,6 @@ size_t anello_data_port::get_data_uart(char *buf, size_t buf_len)
         this->port_parse_fail();
         return 0;
     }
-
     return bytes_read;
 }
 
@@ -234,13 +188,9 @@ size_t anello_data_port::get_data_ethernet(char *buf, size_t buf_len)
 void anello_data_port::write_data(const char *buf, size_t buf_len)
 {
     if (this->config.type == ETH)
-    {
         this->write_data_ethernet(buf, buf_len);
-    }
     else
-    {
         this->write_data_uart(buf, buf_len);
-    }
 }
 
 void anello_data_port::write_data_uart(const char *buf, size_t buf_len)

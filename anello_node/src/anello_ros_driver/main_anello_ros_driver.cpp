@@ -1,33 +1,25 @@
 /********************************************************************************
  * File Name:   main_anello_ros_driver.cpp
- * Description: This file contains the main loop for the anello_ros_driver node.
+ * Description: ROS2 driver node for ANELLO Photonics GNSS/INS devices.
  *
  * Author:      Austin Johnson
  * Date:        7/1/23
  *
  * License:     MIT License
- *
- * Note:        Node entry point is ros_driver_main_loop().
- *
- * 				If a serial interface is not being used, the main loop can be modified
- * 				to read from a another interface with a new object that inherits from
- * 				base_interface.
- *
- * 				Serial interface is hardcoded to /dev/ttyUSB0. This can be changed in
- * 				serial interface constructor parameter.
  ********************************************************************************/
 
-#include <stdio.h>
-#include <string.h>
+#include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <unistd.h>
-#include <csignal>
 #include <iomanip>
+#include <memory>
+#include <cmath>
+#include <stdexcept>
+
 #include "main_anello_ros_driver.h"
 
-#if COMPILE_WITH_ROS2
-//anello output topics
 #include "anello_interfaces/msg/apimu.hpp"
 #include "anello_interfaces/msg/apim1.hpp"
 #include "anello_interfaces/msg/apins.hpp"
@@ -35,13 +27,22 @@
 #include "anello_interfaces/msg/aphdg.hpp"
 #include "anello_interfaces/msg/aphealth.hpp"
 #include "anello_interfaces/msg/apcov.hpp"
+#include "anello_interfaces/msg/apodo.hpp"
+#include "anello_interfaces/srv/cmd_and_rsp.hpp"
 
 #include "sensor_msgs/msg/imu.hpp"
-
-#include "anello_interfaces/msg/apodo.hpp"
+#include "sensor_msgs/msg/nav_sat_fix.hpp"
+#include "sensor_msgs/msg/nav_sat_status.hpp"
 #include "nmea_msgs/msg/sentence.hpp"
 #include "mavros_msgs/msg/rtcm.hpp"
-#endif
+#include "geometry_msgs/msg/transform_stamped.hpp"
+
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2_ros/transform_broadcaster.h"
+#include "diagnostic_updater/diagnostic_updater.hpp"
+
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
+#include "rclcpp_components/register_node_macro.hpp"
 
 #include "bit_tools.h"
 #include "messaging/ntrip_buffer.h"
@@ -50,889 +51,723 @@
 #include "messaging/message_publisher.h"
 #include "messaging/health_message.h"
 
-// anello servies
-#include "anello_interfaces/srv/cmd_and_rsp.hpp"
+static constexpr double kPi = 3.14159265358979323846;
+static constexpr double kGAccel = 9.80665;
+static constexpr double kDeg2Rad = kPi / 180.0;
+static constexpr double kDeg2RadSq = kDeg2Rad * kDeg2Rad;
 
+static int input_a1_data(a1buff_t *a1, uint8_t data);
 
-#ifndef NO_GGA
-#define NO_GGA
-#endif
-
-#ifndef NODE_NAME
-#define NODE_NAME "anello_ros_driver"
-#endif
-
-#ifndef COM_TYPE_NAME 
-#define COM_TYPE_NAME "anello_com_type"
-#endif
-
-#ifndef DATA_PORT_NAME
-#define DATA_PORT_NAME "anello_uart_data_port"
-#endif
-
-#ifndef CONFIG_PORT_NAME
-#define CONFIG_PORT_NAME "anello_uart_config_port"
-#endif
-
-#ifndef BAUDRATE_NAME
-#define BAUDRATE_NAME "baud_rate"
-#endif
-
-#ifndef REMOTE_IP_NAME
-#define REMOTE_IP_NAME "anello_remote_ip"
-#endif
-
-#ifndef LOCAL_DATA_PORT_NAME
-#define LOCAL_DATA_PORT_NAME "anello_local_data_port"
-#endif
-
-#ifndef LOCAL_CONFIG_PORT_NAME
-#define LOCAL_CONFIG_PORT_NAME "anello_local_config_port"
-#endif
-
-#ifndef LOCAL_ODOMETER_PORT_NAME
-#define LOCAL_ODOMETER_PORT_NAME "anello_local_odometer_port"
-#endif
-
-#ifndef COM_TYPE_PARAMETER_NAME
-#define COM_TYPE_PARAMETER_NAME COM_TYPE_NAME
-#endif
-
-#ifndef DATA_PORT_PARAMETER_NAME
-#define DATA_PORT_PARAMETER_NAME DATA_PORT_NAME
-#endif
-
-#ifndef CONFIG_PORT_PARAMETER_NAME
-#define CONFIG_PORT_PARAMETER_NAME CONFIG_PORT_NAME
-#endif
-
-#ifndef BAUDRATE_PARAMETER_NAME
-#define BAUDRATE_PARAMETER_NAME BAUDRATE_NAME
-#endif
-
-#ifndef REMOTE_IP_PARAMETER_NAME
-#define REMOTE_IP_PARAMETER_NAME REMOTE_IP_NAME
-#endif
-
-#ifndef LOCAL_DATA_PORT_PARAMETER_NAME
-#define LOCAL_DATA_PORT_PARAMETER_NAME LOCAL_DATA_PORT_NAME
-#endif
-
-#ifndef LOCAL_CONFIG_PORT_PARAMETER_NAME
-#define LOCAL_CONFIG_PORT_PARAMETER_NAME LOCAL_CONFIG_PORT_NAME
-#endif
-
-#ifndef LOCAL_ODOMETER_PORT_PARAMETER_NAME
-#define LOCAL_ODOMETER_PORT_PARAMETER_NAME LOCAL_ODOMETER_PORT_NAME
-#endif
-
-#ifndef LOG_LATEST_SET
-#define LOG_LATEST_SET 0
-#endif
-
-#ifndef LOG_FILE_NAME
-#define LOG_FILE_NAME "latest_anello_log.txt"
-#endif
-
-#ifndef GYRO_VARIANCE
-#define GYRO_VARIANCE 0.0   // (rad/s)^2
-#endif
-
-#ifndef ACCEL_VARIANCE
-#define ACCEL_VARIANCE 0.0   // (m/s^2)^2
-#endif
-
-#if !(COMPILE_WITH_ROS2)
-volatile sig_atomic_t sigint_received = 0;
-
-void sigint_handler(int sig)
+namespace anello
 {
-	sigint_received = 1;
-}
-#endif
 
-using namespace std;
-
-struct imu_array
+struct ImuCache
 {
-	float data[3] = {0.0f, 0.0f, 0.0f};
+    double ax = 0.0, ay = 0.0, az = 0.0;
+    double wx = 0.0, wy = 0.0, wz = 0.0;
 };
 
-struct orientation_cov
+struct CovCache
 {
-	double RollRoll{0.0};
-	double RollPitch{0.0};
-	double RollHeading{0.0};
-	double PitchRoll{0.0};
-	double PitchPitch{0.0};
-	double PitchHeading{0.0};
-	double HeadingRoll{0.0};
-	double HeadingPitch{0.0};
-	double HeadingHeading{0.0};
+    double orient[9] = {};   // 3x3 row-major: roll, pitch, heading
+    double pos[9] = {};      // 3x3 row-major: lat, lon, alt
 };
 
-struct posCovVec
+struct ReadBuffer
 {
-	double latlat{0.0};
-	double latlon{0.0};
-	double latalt{0.0};
-	double lonlat{0.0};
-	double lonlon{0.0};
-	double lonalt{0.0};
-	double altlat{0.0};
-	double altlon{0.0};
-	double altalt{0.0};
+    int n_used = 0;
+    int nbytes = 0;
+    char buff[MAX_BUF_LEN] = {};
 };
 
-const double PI = 3.14159265;
-const double g_accel = 9.81;
-double d2r = PI/180.0;
-double d2r_squared = d2r*d2r;
-
-typedef struct
-{
-	int n_used;				// how many bytes have been put through the decoded
-	int nbytes;				// how many bytes are stored in the buffer
-	char buff[MAX_BUF_LEN]; // buffer from file
-} file_read_buf_t;
-
-static int input_a1_data(a1buff_t *a1, uint8_t data, FILE *log_file);
 
 class AnelloRosDriver : public rclcpp::Node
 {
 public:
-	AnelloRosDriver()
-		: Node(NODE_NAME,
-			   rclcpp::NodeOptions().allow_undeclared_parameters(true))
-	{
-		RCLCPP_INFO(this->get_logger(), "ANELLO ROS Driver Started");
+    explicit AnelloRosDriver(const rclcpp::NodeOptions &options)
+        : Node("anello_ros_driver", options)
+    {
+        declare_all_parameters();
+        read_parameters();
+        setup_ports();
+        setup_publishers();
+        setup_subscribers();
+        setup_services();
+        setup_tf_broadcaster();
+        setup_diagnostics();
+        setup_timers();
 
+        RCLCPP_INFO(get_logger(), "ANELLO ROS2 driver initialized (v3.0.0)");
+    }
 
-		// get parameters
-		this->declare_parameter(COM_TYPE_PARAMETER_NAME, "UART");
-		this->declare_parameter(DATA_PORT_PARAMETER_NAME, "AUTO");
-		this->declare_parameter(CONFIG_PORT_PARAMETER_NAME, "AUTO");
-		this->declare_parameter(REMOTE_IP_PARAMETER_NAME, "192.168.1.111");
-		this->declare_parameter(LOCAL_DATA_PORT_PARAMETER_NAME, 1111);
-		this->declare_parameter(LOCAL_CONFIG_PORT_PARAMETER_NAME, 2222);
-		this->declare_parameter(LOCAL_ODOMETER_PORT_PARAMETER_NAME, 3333);		
-		this->declare_parameter(BAUDRATE_PARAMETER_NAME, 230400);
-
-		std::string com_type;
-		this->get_parameter(COM_TYPE_PARAMETER_NAME, com_type);
-		this->get_parameter(DATA_PORT_PARAMETER_NAME, config.data_port_name);
-		this->get_parameter(CONFIG_PORT_PARAMETER_NAME, config.config_port_name);
-		this->get_parameter(REMOTE_IP_PARAMETER_NAME, config.remote_ip);
-		this->get_parameter(LOCAL_DATA_PORT_PARAMETER_NAME, config.local_data_port);
-		this->get_parameter(LOCAL_CONFIG_PORT_PARAMETER_NAME, config.local_config_port);
-		this->get_parameter(LOCAL_ODOMETER_PORT_PARAMETER_NAME, config.local_odometer_port);		
-		this->get_parameter(BAUDRATE_PARAMETER_NAME, config.baud_rate);
-
-		RCLCPP_INFO(this->get_logger(), "Using baud_rate=%u", config.baud_rate);
-		
-
-		if (com_type == "UART")
-		{
-			config.type = UART;
-		}
-		else if (com_type == "ETH")
-		{
-			config.type = ETH;
-		}
-		else
-		{
-			config.type = UART;
-		}
-
-#if DEBUG_MAIN
-        auto parameters = list_parameters({}, 10); // Empty prefixes vector and a depth of 10
-		RCLCPP_INFO(this->get_logger(), "Available parameters:");
-        for (const auto & name : parameters.names) {
-            RCLCPP_INFO(this->get_logger(), " - %s", name.c_str());
-        }
-
-		DEBUG_PRINT("Com Type: %s", com_type.c_str());
-		DEBUG_PRINT("Data Port: %s", config.data_port_name.c_str());
-		DEBUG_PRINT("Config Port: %s", config.config_port_name.c_str());
-		DEBUG_PRINT("Remote IP: %s", config.remote_ip.c_str());
-		DEBUG_PRINT("Local Data Port: %d", config.local_data_port);
-		DEBUG_PRINT("Local Config Port: %d", config.local_config_port);
-		DEBUG_PRINT("Local Odometer Port: %d", config.local_odometer_port);
-#endif
-
-		// Create ports
-		config_port = new anello_config_port(&config);
-		config_port->init();
-
-		data_port = new anello_data_port(&config);
-		data_port->init();
-
-
-		// create publishers
-		_imu_publisher = this->create_publisher<anello_interfaces::msg::APIMU>("APIMU", 10);
-		_im1_publisher = this->create_publisher<anello_interfaces::msg::APIM1>("APIM1", 10);
-		_ins_publisher = this->create_publisher<anello_interfaces::msg::APINS>("APINS", 10);
-		_gps_publisher = this->create_publisher<anello_interfaces::msg::APGPS>("APGPS", 10);
-		_gp2_publisher = this->create_publisher<anello_interfaces::msg::APGPS>("APGP2", 10);
-		_hdg_publisher = this->create_publisher<anello_interfaces::msg::APHDG>("APHDG", 10);
-		_health_publisher = this->create_publisher<anello_interfaces::msg::APHEALTH>("APHEALTH", 1);
-		_gga_publisher = this->create_publisher<nmea_msgs::msg::Sentence>("ntrip_client/nmea", 1);
-		_apcov_publisher = this->create_publisher<anello_interfaces::msg::APCOV>("APCOV", 10);
-
-		_ros_imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("IMU", 10);
-	    _navfix_publisher = this->create_publisher<sensor_msgs::msg::NavSatFix>("GPS/FIX", 10);
-
-		// create a ntrip rtcm subscriber
-		_rtcm_subscriber = this->create_subscription<mavros_msgs::msg::RTCM>(
-			"ntrip_client/rtcm", 
-			10, 
-			std::bind(&AnelloRosDriver::ntrip_rtcm_callback, this, std::placeholders::_1)
-		);
-
-		// create an odo subscriber
-		_odo_subscriber = this->create_subscription<anello_interfaces::msg::APODO>(
-			"APODO", 
-			1, 
-			std::bind(&AnelloRosDriver::odo_callback, this, std::placeholders::_1)
-		);
-
-		// create service server for command callback
-		_srv_send_cmd = this->create_service<anello_interfaces::srv::CmdAndRsp>("send_cmd", std::bind(&AnelloRosDriver::send_command_callback, this, std::placeholders::_1, std::placeholders::_2));
-
-		timer_ = this->create_wall_timer(1us, std::bind(&AnelloRosDriver::mainloop_callback, this));
-		health_message_timer_ = this->create_wall_timer(1s, std::bind(&AnelloRosDriver::health_callback, this));
-
-	}
-
-	~AnelloRosDriver()
-	{
-		delete data_port;
-		delete config_port;
-	}
+    ~AnelloRosDriver() override = default;
 
 private:
+    // ── Parameter declaration ──────────────────────────────────────────
+    void declare_all_parameters()
+    {
+        auto d = [](const std::string &desc) {
+            rcl_interfaces::msg::ParameterDescriptor pd;
+            pd.description = desc;
+            return pd;
+        };
 
-	/* pull raw decoded_val[] -> intermediate arrays */
-	void storeLastImuData(const double decoded_val[]);
-	void storeLastCovariances(const double decoded_val[]);
+        declare_parameter("com_type", "UART",
+            d("Communication type: UART or ETH"));
+        declare_parameter("uart_data_port", "AUTO",
+            d("UART data port path or AUTO for auto-detection"));
+        declare_parameter("uart_config_port", "AUTO",
+            d("UART config port path, AUTO, or OFF"));
+        declare_parameter("baud_rate", 230400,
+            d("Serial baud rate (230400 or 921600)"));
+        declare_parameter("remote_ip", "192.168.1.111",
+            d("Remote IP for ethernet mode"));
+        declare_parameter("local_data_port", 1111,
+            d("Local UDP port for data (ethernet mode)"));
+        declare_parameter("local_config_port", 2222,
+            d("Local UDP port for config (ethernet mode)"));
+        declare_parameter("local_odometer_port", 3333,
+            d("Local UDP port for odometer (ethernet mode)"));
 
-	/* build & publish the ROS Imu + NavSatFix */
-	void pubRosImuAndNav(const double decoded_val[]);
+        declare_parameter("frame_id.imu", "imu_link",
+            d("Frame ID for IMU messages"));
+        declare_parameter("frame_id.ins", "ins_link",
+            d("Frame ID for INS messages"));
+        declare_parameter("frame_id.gnss", "gnss_link",
+            d("Frame ID for GNSS messages"));
+        declare_parameter("frame_id.hdg", "gnss_link",
+            d("Frame ID for dual-antenna heading messages"));
 
+        declare_parameter("publish_tf", true,
+            d("Publish TF transform from odom to ins_link"));
+        declare_parameter("tf_parent_frame", "odom",
+            d("Parent frame for TF broadcast"));
 
-	/* Main Decoder loop 
-	* Reads the serial port calls the decoder and publishes the messages
-	* Called via this->timer_
-	*
-	*/
-	void mainloop_callback()
-	{
-		bool checksum_passed = 0;
-		char *val[MAXFIELD];
-		double decoded_val[MAXFIELD];
-		double imu_vals[MAXFIELD];
-		double ins_vals[MAXFIELD];
+        declare_parameter("poll_interval_ms", 5,
+            d("Main loop polling interval in milliseconds"));
+    }
 
+    void read_parameters()
+    {
+        std::string com_type = get_parameter("com_type").as_string();
+        if (com_type == "ETH")
+            config_.type = ETH;
+        else
+            config_.type = UART;
 
-		if (serial_read_buffer.n_used >= serial_read_buffer.nbytes)
-		{
-			serial_read_buffer.nbytes = data_port->get_data(serial_read_buffer.buff, MAX_BUF_LEN);
-			serial_read_buffer.n_used = 0;
-		}
+        config_.data_port_name = get_parameter("uart_data_port").as_string();
+        config_.config_port_name = get_parameter("uart_config_port").as_string();
+        config_.baud_rate = static_cast<uint32_t>(get_parameter("baud_rate").as_int());
+        config_.remote_ip = get_parameter("remote_ip").as_string();
+        config_.local_data_port = static_cast<int>(get_parameter("local_data_port").as_int());
+        config_.local_config_port = static_cast<int>(get_parameter("local_config_port").as_int());
+        config_.local_odometer_port = static_cast<int>(get_parameter("local_odometer_port").as_int());
 
-		while (serial_read_buffer.n_used < serial_read_buffer.nbytes)
-		{
-			int ret = input_a1_data(&a1buff, serial_read_buffer.buff[serial_read_buffer.n_used], nullptr);
-			serial_read_buffer.n_used++;
+        frame_imu_ = get_parameter("frame_id.imu").as_string();
+        frame_ins_ = get_parameter("frame_id.ins").as_string();
+        frame_gnss_ = get_parameter("frame_id.gnss").as_string();
+        frame_hdg_ = get_parameter("frame_id.hdg").as_string();
+        publish_tf_ = get_parameter("publish_tf").as_bool();
+        tf_parent_ = get_parameter("tf_parent_frame").as_string();
+        poll_ms_ = get_parameter("poll_interval_ms").as_int();
 
-			if (ret)
-			{
-				int isOK = 0;
-				int num = 0;
-
-				if (ret == 1)
-				{
-
-					// check that the checksum is correct
-					checksum_passed = checksum(a1buff.buf, a1buff.nbyte);
-					if (checksum_passed)
-					{
-						num = parse_fields((char *)a1buff.buf, val);
-					}
-					else
-					{
-						RCLCPP_WARN(this->get_logger(), "Checksum Fail: %s", a1buff.buf);
-						num = 0;
-					}
-				
-
-					if (!isOK && num >= 17 && strstr(val[0], "APGPS") != NULL)
-					{
-						// ascii gps
-						decode_ascii_gps(val, decoded_val);
-						publish_gps(decoded_val, _gps_publisher);
-						publish_gga(decoded_val, _gga_publisher, this->now());
-						_health_msg.add_gps_message(decoded_val);
-#if DEBUG_MAIN
-						printf("APGPSa\n");
-#endif
-						isOK = 1;
-					}
-					else if (!isOK && num >= 17 && strstr(val[0], "APGP2") != NULL)
-					{
-						// ascii gp2 (goes to the same place for now)
-						decode_ascii_gps(val, decoded_val);
-						publish_gp2(decoded_val, _gp2_publisher);
-#if DEBUG_MAIN
-						printf("APGP2a\n");
-#endif
-						isOK = 1;
-					}
-					else if (!isOK && num >= 12 && strstr(val[0], "APHDG") != NULL)
-					{
-						// ascii hdg
-						decode_ascii_hdr(val, decoded_val);
-						publish_hdr(decoded_val, _hdg_publisher);
-						_health_msg.add_hdg_message(decoded_val);
-#if DEBUG_MAIN
-						printf("APHDGa\n");
-#endif
-						isOK = 1;
-					}
-					else if (!isOK && num >= 12 && strstr(val[0], "APIMU") != NULL)
-					{
-						// ascii imu
-						decode_ascii_imu(val, num, decoded_val);
-						publish_imu(decoded_val, _imu_publisher);
-						_health_msg.add_imu_message(decoded_val);
-						
-						storeLastImuData(decoded_val);
-#if DEBUG_MAIN
-						printf("APIMUa\n");
-#endif
-						isOK = 1;
-					}
-					else if (!isOK && num >= 10 && strstr(val[0], "APIM1") != NULL)
-					{
-						// ascii im1
-						decode_ascii_im1(val, num, decoded_val);
-						publish_im1(decoded_val, _im1_publisher);
-#if DEBUG_MAIN
-						printf("APIM1a\n");
-#endif
-						isOK = 1;
-					}
-					else if (!isOK && num >= 17 && strstr(val[0], "APCOV") != NULL)
-					{
-						// ascii cov
-						decode_ascii_cov(val, decoded_val);
-						publish_cov(decoded_val, _apcov_publisher);
-
-						storeLastCovariances(decoded_val);
+        RCLCPP_INFO(get_logger(), "com_type=%s baud=%u poll=%ldms",
+                     com_type.c_str(), config_.baud_rate, poll_ms_);
+    }
 
 
-#if DEBUG_MAIN
-						printf("APCOVa\n");
-#endif
-						isOK = 1;
-					}
-					else if (!isOK && num >= 14 && strstr(val[0], "APINS") != NULL)
-					{
-						// ascii ins and publish standard ROS Imu msg form
-						decode_ascii_ins(val, decoded_val);
-						publish_ins(decoded_val, _ins_publisher);
-						_health_msg.add_ins_message(decoded_val);
-						
-						pubRosImuAndNav(decoded_val);
+    // ── Port setup ─────────────────────────────────────────────────────
+    void setup_ports()
+    {
+        try {
+            config_port_ = std::make_unique<anello_config_port>(&config_);
+            config_port_->init();
+        } catch (const std::exception &e) {
+            RCLCPP_ERROR(get_logger(), "Config port init failed: %s", e.what());
+            // Config port failure is not fatal — command service won't work
+        }
 
-#if DEBUG_MAIN
-						printf("APINSa\n");
-#endif
-						isOK = 1;
-					}
+        try {
+            data_port_ = std::make_unique<anello_data_port>(&config_);
+            data_port_->init();
+        } catch (const std::exception &e) {
+            RCLCPP_FATAL(get_logger(), "Data port init failed: %s", e.what());
+            throw;
+        }
+    }
 
-				}
-				else if (ret == 5)
-				{
-					// RTCM message
-					if (a1buff.type == 4058 && !a1buff.crc)
-					{
-						if (a1buff.subtype == 1)	/* IMU */
-						{
-							decode_rtcm_imu_msg(decoded_val, a1buff);
-							publish_imu(decoded_val, _imu_publisher);
-							_health_msg.add_imu_message(decoded_val);
+    // ── Publishers ─────────────────────────────────────────────────────
+    void setup_publishers()
+    {
+        auto sensor_qos = rclcpp::SensorDataQoS();
 
-							storeLastImuData(decoded_val);
+        pub_imu_ = create_publisher<anello_interfaces::msg::APIMU>("anello/imu_raw", sensor_qos);
+        pub_im1_ = create_publisher<anello_interfaces::msg::APIM1>("anello/im1", sensor_qos);
+        pub_ins_ = create_publisher<anello_interfaces::msg::APINS>("anello/ins", sensor_qos);
+        pub_gps_ = create_publisher<anello_interfaces::msg::APGPS>("anello/gps", sensor_qos);
+        pub_gp2_ = create_publisher<anello_interfaces::msg::APGPS>("anello/gps2", sensor_qos);
+        pub_hdg_ = create_publisher<anello_interfaces::msg::APHDG>("anello/hdg", sensor_qos);
+        pub_cov_ = create_publisher<anello_interfaces::msg::APCOV>("anello/cov", sensor_qos);
+        pub_health_ = create_publisher<anello_interfaces::msg::APHEALTH>("anello/health", 1);
+        pub_gga_ = create_publisher<nmea_msgs::msg::Sentence>("ntrip_client/nmea", 1);
 
-							isOK = 1;
-						}
-						else if (a1buff.subtype == 2) /* GPS PVT*/
-						{
-							int ant_id = decode_rtcm_gps_msg(decoded_val, a1buff);
-							if (GPS1 == ant_id)
-							{
-								publish_gps(decoded_val, _gps_publisher);
-								publish_gga(decoded_val, _gga_publisher, this->now());
-								_health_msg.add_gps_message(decoded_val);
-							}
-							else
-							{
-								publish_gp2(decoded_val, _gp2_publisher);
-							}
+        pub_ros_imu_ = create_publisher<sensor_msgs::msg::Imu>("imu/data", sensor_qos);
+        pub_navfix_ = create_publisher<sensor_msgs::msg::NavSatFix>("gps/fix", sensor_qos);
+    }
 
-							isOK = 1;
-						}
-						else if (a1buff.subtype == 3) /* DUAL ANTENNA */
-						{
-							decode_rtcm_hdg_msg(decoded_val, a1buff);
-							publish_hdr(decoded_val, _hdg_publisher);
-							_health_msg.add_hdg_message(decoded_val);
+    // ── Subscribers ────────────────────────────────────────────────────
+    void setup_subscribers()
+    {
+        sub_rtcm_ = create_subscription<mavros_msgs::msg::RTCM>(
+            "ntrip_client/rtcm", 10,
+            [this](const mavros_msgs::msg::RTCM::SharedPtr msg) {
+                if (data_port_)
+                    data_port_->write_data(
+                        reinterpret_cast<const char *>(msg->data.data()),
+                        msg->data.size());
+            });
 
-							isOK = 1;
+        sub_odo_ = create_subscription<anello_interfaces::msg::APODO>(
+            "anello/odo", 1,
+            [this](const anello_interfaces::msg::APODO::SharedPtr msg) {
+                if (!config_port_) return;
+                std::ostringstream body;
+                body << "APODO," << std::fixed << std::setprecision(2) << msg->odo_speed;
+                std::string body_str = body.str();
+                std::string ck = compute_checksum(body_str.c_str(), body_str.length());
+                std::string full = "#" + body_str + "*" + ck + "\r\n";
+                config_port_->write_data(full.c_str(), full.length());
+            });
+    }
 
-						}
-						else if (a1buff.subtype == 4) /* INS */
-						{
-							decode_rtcm_ins_msg(decoded_val, a1buff);
-							publish_ins(decoded_val, _ins_publisher);
-							_health_msg.add_ins_message(decoded_val);
+    // ── Services ───────────────────────────────────────────────────────
+    void setup_services()
+    {
+        srv_cmd_ = create_service<anello_interfaces::srv::CmdAndRsp>(
+            "anello/send_cmd",
+            [this](const std::shared_ptr<anello_interfaces::srv::CmdAndRsp::Request> req,
+                   std::shared_ptr<anello_interfaces::srv::CmdAndRsp::Response> res) {
+                send_command_callback(req, res);
+            });
+    }
 
-							pubRosImuAndNav(decoded_val);
+    void send_command_callback(
+        const std::shared_ptr<anello_interfaces::srv::CmdAndRsp::Request> req,
+        std::shared_ptr<anello_interfaces::srv::CmdAndRsp::Response> res)
+    {
+        if (!config_port_) {
+            res->response = "ERROR: config port not available";
+            return;
+        }
+        constexpr int kMaxResp = 512;
+        char read_buf[kMaxResp];
+        std::string response;
+
+        std::string body = req->command;
+        std::string ck = compute_checksum(body.c_str(), body.size());
+        std::string full = "#" + body + "*" + ck + "\r\n";
+
+        config_port_->write_data(full.c_str(), static_cast<int>(full.size()));
+
+        auto start = std::chrono::steady_clock::now();
+        auto timeout = std::chrono::milliseconds(500);
+
+        while (std::chrono::steady_clock::now() - start < timeout) {
+            int n = static_cast<int>(config_port_->get_data(read_buf, kMaxResp - 1));
+            if (n > 0) {
+                read_buf[n] = '\0';
+                response += read_buf;
+                if (response.size() >= 2 &&
+                    response.substr(response.size() - 2) == "\r\n")
+                    break;
+            }
+            usleep(2000);
+        }
+
+        res->response = response;
+        RCLCPP_DEBUG(get_logger(), "send_cmd: sent='%s' got='%s'",
+                     full.c_str(), response.c_str());
+    }
 
 
-							isOK = 1;
-						}
-						else if (a1buff.subtype == 6) /* IM1 */
-						{
-							decode_rtcm_im1_msg(decoded_val, a1buff);
-							publish_im1(decoded_val, _im1_publisher);
+    // ── TF broadcaster ────────────────────────────────────────────────
+    void setup_tf_broadcaster()
+    {
+        if (publish_tf_)
+            tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    }
 
-							isOK = 1;
-						}
-						else if (a1buff.subtype == 10) /* APCOV */
-						{
-							decode_rtcm_cov_msg(decoded_val, a1buff);
-							publish_cov(decoded_val, _apcov_publisher);
+    void broadcast_ins_tf(double roll_deg, double pitch_deg, double heading_deg)
+    {
+        if (!tf_broadcaster_) return;
 
-							storeLastCovariances(decoded_val);
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = now();
+        t.header.frame_id = tf_parent_;
+        t.child_frame_id = frame_ins_;
 
-							isOK = 1;
-						}
+        t.transform.translation.x = 0.0;
+        t.transform.translation.y = 0.0;
+        t.transform.translation.z = 0.0;
 
-					}
-				}
+        tf2::Quaternion q;
+        q.setRPY(roll_deg * kDeg2Rad, pitch_deg * kDeg2Rad, heading_deg * kDeg2Rad);
+        t.transform.rotation.x = q.x();
+        t.transform.rotation.y = q.y();
+        t.transform.rotation.z = q.z();
+        t.transform.rotation.w = q.w();
 
-				if (!isOK)
-				{
-					data_port->port_parse_fail();
-				}
-				else
-				{
-					memset(decoded_val, 0, MAXFIELD * sizeof(double));
-					data_port->port_confirm();
-				}
-				a1buff.nbyte = 0;
-			}
-		}
-	}
+        tf_broadcaster_->sendTransform(t);
+    }
 
-	void send_command_callback(
-		const std::shared_ptr<anello_interfaces::srv::CmdAndRsp::Request>  req,
-		std::shared_ptr<anello_interfaces::srv::CmdAndRsp::Response>       res)
-	{
-		const int resp_max_data = 512;
-		char read_buf[resp_max_data];
-		std::string response;
+    // ── Diagnostics ───────────────────────────────────────────────────
+    void setup_diagnostics()
+    {
+        diag_updater_ = std::make_unique<diagnostic_updater::Updater>(this);
+        diag_updater_->setHardwareID("anello_gnss_ins");
 
-		// build the full ASCII command with checksum and terminator
-		std::string body = req->command;  
-		std::string ck   = compute_checksum(body.c_str(), body.size());
+        diag_updater_->add("ANELLO Device Status", [this](diagnostic_updater::DiagnosticStatusWrapper &stat) {
+            uint8_t pos = health_msg_.get_position_status();
+            uint8_t hdg = health_msg_.get_heading_status();
+            uint8_t gyro = health_msg_.get_gyro_status();
 
-		std::string full = "#" + body + "*" + ck + "\r\n";
+            if (pos == 0 && hdg == 0 && gyro == 0)
+                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::OK, "All systems nominal");
+            else if (gyro > 0)
+                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::ERROR, "Gyro health degraded");
+            else
+                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::WARN, "Degraded accuracy");
 
-		// send it
-		config_port->write_data(full.c_str(), (int)full.size());
+            stat.add("position_accuracy", pos == 0 ? "cm" : (pos == 1 ? "m" : ">1m"));
+            stat.add("heading_health", hdg == 0 ? "stable" : "unstable");
+            stat.add("gyro_health", gyro == 0 ? "good" : "bad");
+            stat.add("data_port", data_port_ ? data_port_->get_portname() : "N/A");
+            stat.add("config_port", config_port_ ? config_port_->get_portname() : "N/A");
+        });
+    }
 
-		// now read until we see "\r\n" or timeout
-		auto start = std::chrono::steady_clock::now();
-		auto timeout = std::chrono::milliseconds(100);
+    // ── Timers ────────────────────────────────────────────────────────
+    void setup_timers()
+    {
+        timer_ = create_wall_timer(
+            std::chrono::milliseconds(poll_ms_),
+            std::bind(&AnelloRosDriver::mainloop_callback, this));
+        health_timer_ = create_wall_timer(
+            std::chrono::seconds(1),
+            std::bind(&AnelloRosDriver::health_callback, this));
+    }
 
-		while (std::chrono::steady_clock::now() - start < timeout) {
-			int n = config_port->get_data(read_buf, resp_max_data - 1);
-			if (n < 0) {
-			RCLCPP_ERROR(this->get_logger(), "send_command: read error");
-			break;
-			}
-			if (n > 0) {
-			read_buf[n] = '\0';
-			response += read_buf;
-			// if we've seen the proper line ending, stop
-			if (response.size() >= 2 &&
-				response.substr(response.size() - 2) == "\r\n")
-			{
-				break;
-			}
-			}
-			// small sleep so we don't spin too tight
-			usleep(2000);  // 2 ms
-		}
+    void health_callback()
+    {
+        publish_health(&health_msg_, pub_health_, now());
+    }
 
-		// hand it back
-		res->response = response;
 
-		RCLCPP_DEBUG(this->get_logger(),
-					"send_command: sent='%s' got='%s'",
-					full.c_str(), response.c_str());
-	}
-	
+    // ── Main decode loop ──────────────────────────────────────────────
+    void mainloop_callback()
+    {
+        if (!data_port_) return;
 
-	/* APODO topic callback
-	* Makes APODO message into a string and sends it to the config port
-	*
-	*/
-	void odo_callback(const anello_interfaces::msg::APODO::SharedPtr msg)
-	{
-		msg->odo_speed;
-#if DEBUG_SUBSCRIBERS
-		RCLCPP_INFO(this->get_logger(), "APODO Received %.2f", msg->odo_speed);
-#endif
+        if (read_buf_.n_used >= read_buf_.nbytes)
+        {
+            read_buf_.nbytes = static_cast<int>(
+                data_port_->get_data(read_buf_.buff, MAX_BUF_LEN));
+            read_buf_.n_used = 0;
+        }
 
-		std::stringstream speed_body;
-		speed_body << std::fixed << std::setprecision(2) << msg->odo_speed;
+        while (read_buf_.n_used < read_buf_.nbytes)
+        {
+            int ret = input_a1_data(&a1buff_,
+                static_cast<uint8_t>(read_buf_.buff[read_buf_.n_used]));
+            read_buf_.n_used++;
 
-		std::stringstream message_body;
-		message_body << "APODO";
-		message_body << ',';
-		message_body << speed_body.str();
-		std::string message_body_str = message_body.str();
+            if (!ret) continue;
 
-		std::string ck_string = compute_checksum(message_body_str.c_str(), message_body_str.length());
+            bool is_ok = false;
+            int num = 0;
+            char *val[MAXFIELD];
+            double decoded_val[MAXFIELD] = {};
 
-		std::stringstream full_message;
-		full_message << '#';
-		full_message << message_body_str;
-		full_message << '*';
-		full_message << ck_string;
-		full_message << "\r\n";
-		std::string full_message_str = full_message.str();
+            if (ret == 1)
+            {
+                // ASCII message
+                if (checksum(a1buff_.buf, a1buff_.nbyte))
+                {
+                    num = parse_fields(reinterpret_cast<char *>(a1buff_.buf), val);
+                }
+                else
+                {
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                        "Checksum fail: %s", a1buff_.buf);
+                    num = 0;
+                }
 
-		config_port->write_data((char *)full_message_str.c_str(), full_message_str.length());
-	}
+                auto stamp = now();
 
-	void ntrip_rtcm_callback(const mavros_msgs::msg::RTCM::SharedPtr msg)
-	{
-#if DEBUG_SUBSCRIBERS
-		RCLCPP_INFO(this->get_logger(), "RTCM callback: %ld bytes\n", msg->data.size());
-#endif
+                if (num >= 17 && strstr(val[0], "APGPS") != nullptr)
+                {
+                    decode_ascii_gps(val, decoded_val);
+                    publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
+                    publish_gga(decoded_val, pub_gga_, stamp);
+                    health_msg_.add_gps_message(decoded_val);
+                    is_ok = true;
+                }
+                else if (num >= 17 && strstr(val[0], "APGP2") != nullptr)
+                {
+                    decode_ascii_gps(val, decoded_val);
+                    publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);
+                    is_ok = true;
+                }
+                else if (num >= 12 && strstr(val[0], "APHDG") != nullptr)
+                {
+                    decode_ascii_hdr(val, decoded_val);
+                    publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
+                    health_msg_.add_hdg_message(decoded_val);
+                    is_ok = true;
+                }
+                else if (num >= 12 && strstr(val[0], "APIMU") != nullptr)
+                {
+                    decode_ascii_imu(val, num, decoded_val);
+                    publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
+                    health_msg_.add_imu_message(decoded_val);
+                    store_last_imu(decoded_val);
+                    is_ok = true;
+                }
+                else if (num >= 10 && strstr(val[0], "APIM1") != nullptr)
+                {
+                    decode_ascii_im1(val, num, decoded_val);
+                    publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
+                    is_ok = true;
+                }
+                else if (num >= 17 && strstr(val[0], "APCOV") != nullptr)
+                {
+                    decode_ascii_cov(val, decoded_val);
+                    publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
+                    store_last_cov(decoded_val);
+                    is_ok = true;
+                }
+                else if (num >= 14 && strstr(val[0], "APINS") != nullptr)
+                {
+                    decode_ascii_ins(val, decoded_val);
+                    publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
+                    health_msg_.add_ins_message(decoded_val);
+                    publish_ros_imu_and_nav(decoded_val, stamp);
+                    broadcast_ins_tf(decoded_val[9], decoded_val[10], decoded_val[11]);
+                    is_ok = true;
+                }
+            }
+            else if (ret == 5)
+            {
+                is_ok = handle_rtcm_message(decoded_val);
+            }
 
-		data_port->write_data((char *)msg->data.data(), msg->data.size());
-		
+            if (is_ok) {
+                data_port_->port_confirm();
+            } else {
+                data_port_->port_parse_fail();
+            }
+            a1buff_.nbyte = 0;
+        }
+    }
 
-	}
 
-	/* Health message callback */
-	void health_callback()
-	{
-		publish_health(&_health_msg, _health_publisher);
-	}
-	
-	imu_pub_t _imu_publisher;
-	im1_pub_t _im1_publisher;
-	ins_pub_t _ins_publisher;
-	gps_pub_t _gps_publisher;
-	gps_pub_t _gp2_publisher;
-	hdg_pub_t _hdg_publisher;
-	health_pub_t _health_publisher;
-	gga_pub_t _gga_publisher;
-	apcov_pub_t _apcov_publisher;
+    // ── RTCM handler ──────────────────────────────────────────────────
+    bool handle_rtcm_message(double *decoded_val)
+    {
+        if (a1buff_.type != 4058 || a1buff_.crc)
+            return false;
 
-	ros_imu_pub_t _ros_imu_pub;
-	navfix_pub_t _navfix_publisher;
+        auto stamp = now();
 
-	rclcpp::Subscription<mavros_msgs::msg::RTCM>::SharedPtr _rtcm_subscriber;
-	rclcpp::Subscription<anello_interfaces::msg::APODO>::SharedPtr _odo_subscriber;
+        switch (a1buff_.subtype) {
+        case 1: // IMU
+            decode_rtcm_imu_msg(decoded_val, a1buff_);
+            publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
+            health_msg_.add_imu_message(decoded_val);
+            store_last_imu(decoded_val);
+            return true;
 
-	anello_data_port *data_port;
-	anello_config_port *config_port;
+        case 2: { // GPS PVT
+            int ant_id = decode_rtcm_gps_msg(decoded_val, a1buff_);
+            if (GPS1 == ant_id) {
+                publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
+                publish_gga(decoded_val, pub_gga_, stamp);
+                health_msg_.add_gps_message(decoded_val);
+            } else {
+                publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);
+            }
+            return true;
+        }
 
-	rclcpp::Service<anello_interfaces::srv::CmdAndRsp>::SharedPtr _srv_send_cmd;
+        case 3: // Dual antenna heading
+            decode_rtcm_hdg_msg(decoded_val, a1buff_);
+            publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
+            health_msg_.add_hdg_message(decoded_val);
+            return true;
 
-	rclcpp::TimerBase::SharedPtr timer_;
-	rclcpp::TimerBase::SharedPtr health_message_timer_;
+        case 4: // INS
+            decode_rtcm_ins_msg(decoded_val, a1buff_);
+            publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
+            health_msg_.add_ins_message(decoded_val);
+            publish_ros_imu_and_nav(decoded_val, stamp);
+            broadcast_ins_tf(decoded_val[9], decoded_val[10], decoded_val[11]);
+            return true;
 
-	// buffers for callbacks
-	port_buffer data_port_write_buffer;
-	port_buffer config_port_write_buffer;
+        case 6: // IM1
+            decode_rtcm_im1_msg(decoded_val, a1buff_);
+            publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
+            return true;
 
-	interface_config_t config;
+        case 10: // APCOV
+            decode_rtcm_cov_msg(decoded_val, a1buff_);
+            publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
+            store_last_cov(decoded_val);
+            return true;
 
-	file_read_buf_t serial_read_buffer;
-	
-	a1buff_t a1buff;
+        default:
+            return false;
+        }
+    }
 
-	health_message _health_msg;
+    // ── Standard ROS message publishing ───────────────────────────────
+    void store_last_imu(const double val[])
+    {
+        imu_cache_.ax = val[1]; imu_cache_.ay = val[2]; imu_cache_.az = val[3];
+        imu_cache_.wx = val[4]; imu_cache_.wy = val[5]; imu_cache_.wz = val[6];
+    }
 
-	imu_array last_linear_accel_;
+    void store_last_cov(const double val[])
+    {
+        // Orientation covariance (deg^2) indices 13-18
+        cov_cache_.orient[0] = val[13]; // roll-roll
+        cov_cache_.orient[1] = val[16]; // roll-pitch
+        cov_cache_.orient[2] = val[17]; // roll-heading
+        cov_cache_.orient[3] = val[16]; // pitch-roll (symmetric)
+        cov_cache_.orient[4] = val[14]; // pitch-pitch
+        cov_cache_.orient[5] = val[18]; // pitch-heading
+        cov_cache_.orient[6] = val[17]; // heading-roll (symmetric)
+        cov_cache_.orient[7] = val[18]; // heading-pitch (symmetric)
+        cov_cache_.orient[8] = val[15]; // heading-heading
 
-	imu_array last_angular_vel_;
+        // Position covariance (m^2) indices 1-6
+        cov_cache_.pos[0] = val[1]; // lat-lat
+        cov_cache_.pos[1] = val[4]; // lat-lon
+        cov_cache_.pos[2] = val[5]; // lat-alt
+        cov_cache_.pos[3] = val[4]; // lon-lat
+        cov_cache_.pos[4] = val[2]; // lon-lon
+        cov_cache_.pos[5] = val[6]; // lon-alt
+        cov_cache_.pos[6] = val[5]; // alt-lat
+        cov_cache_.pos[7] = val[6]; // alt-lon
+        cov_cache_.pos[8] = val[3]; // alt-alt
+    }
 
-	orientation_cov last_orientation_cov_;
+    void publish_ros_imu_and_nav(const double ins[], rclcpp::Time stamp)
+    {
+        // ── sensor_msgs/Imu ──
+        auto imu_msg = sensor_msgs::msg::Imu();
+        imu_msg.header.stamp = stamp;
+        imu_msg.header.frame_id = frame_imu_;
 
-	posCovVec last_position_cov_;
-	
+        double roll_r  = ins[9]  * kDeg2Rad;
+        double pitch_r = ins[10] * kDeg2Rad;
+        double hdg_r   = ins[11] * kDeg2Rad;
 
-	size_t count;
+        tf2::Quaternion q;
+        q.setRPY(roll_r, pitch_r, hdg_r);
+        imu_msg.orientation.x = q.x();
+        imu_msg.orientation.y = q.y();
+        imu_msg.orientation.z = q.z();
+        imu_msg.orientation.w = q.w();
+
+        imu_msg.angular_velocity.x = imu_cache_.wx * kDeg2Rad;
+        imu_msg.angular_velocity.y = imu_cache_.wy * kDeg2Rad;
+        imu_msg.angular_velocity.z = imu_cache_.wz * kDeg2Rad;
+
+        imu_msg.linear_acceleration.x = imu_cache_.ax * kGAccel;
+        imu_msg.linear_acceleration.y = imu_cache_.ay * kGAccel;
+        imu_msg.linear_acceleration.z = imu_cache_.az * kGAccel;
+
+        for (int i = 0; i < 9; ++i)
+            imu_msg.orientation_covariance[i] = cov_cache_.orient[i] * kDeg2RadSq;
+
+        pub_ros_imu_->publish(imu_msg);
+
+        // ── sensor_msgs/NavSatFix ──
+        auto nav = sensor_msgs::msg::NavSatFix();
+        nav.header.stamp = stamp;
+        nav.header.frame_id = frame_gnss_;
+
+        nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+        nav.status.service =
+            sensor_msgs::msg::NavSatStatus::SERVICE_GPS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_GLONASS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_COMPASS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_GALILEO;
+
+        nav.latitude  = ins[3];
+        nav.longitude = ins[4];
+        nav.altitude  = ins[5];
+
+        // ENU covariance: [lon,lat,alt] -> [ee,en,eu; ne,nn,nu; ue,un,uu]
+        nav.position_covariance[0] = cov_cache_.pos[4]; // lon-lon
+        nav.position_covariance[1] = cov_cache_.pos[1]; // lat-lon
+        nav.position_covariance[2] = cov_cache_.pos[5]; // lon-alt
+        nav.position_covariance[3] = cov_cache_.pos[1]; // lat-lon
+        nav.position_covariance[4] = cov_cache_.pos[0]; // lat-lat
+        nav.position_covariance[5] = cov_cache_.pos[2]; // lat-alt
+        nav.position_covariance[6] = cov_cache_.pos[5]; // lon-alt
+        nav.position_covariance[7] = cov_cache_.pos[2]; // lat-alt
+        nav.position_covariance[8] = cov_cache_.pos[8]; // alt-alt
+        nav.position_covariance_type = sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN;
+
+        pub_navfix_->publish(nav);
+    }
+
+
+    // ── Member variables ──────────────────────────────────────────────
+    interface_config_t config_;
+
+    std::unique_ptr<anello_config_port> config_port_;
+    std::unique_ptr<anello_data_port> data_port_;
+
+    // Publishers
+    imu_pub_t pub_imu_;
+    im1_pub_t pub_im1_;
+    ins_pub_t pub_ins_;
+    gps_pub_t pub_gps_;
+    gps_pub_t pub_gp2_;
+    hdg_pub_t pub_hdg_;
+    apcov_pub_t pub_cov_;
+    health_pub_t pub_health_;
+    gga_pub_t pub_gga_;
+    ros_imu_pub_t pub_ros_imu_;
+    navfix_pub_t pub_navfix_;
+
+    // Subscribers
+    rclcpp::Subscription<mavros_msgs::msg::RTCM>::SharedPtr sub_rtcm_;
+    rclcpp::Subscription<anello_interfaces::msg::APODO>::SharedPtr sub_odo_;
+
+    // Service
+    rclcpp::Service<anello_interfaces::srv::CmdAndRsp>::SharedPtr srv_cmd_;
+
+    // TF
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+    // Diagnostics
+    std::unique_ptr<diagnostic_updater::Updater> diag_updater_;
+
+    // Timers
+    rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr health_timer_;
+
+    // Frame IDs
+    std::string frame_imu_, frame_ins_, frame_gnss_, frame_hdg_;
+    bool publish_tf_ = true;
+    std::string tf_parent_;
+    int64_t poll_ms_ = 5;
+
+    // Decode state
+    ReadBuffer read_buf_;
+    a1buff_t a1buff_;
+    health_message health_msg_;
+    ImuCache imu_cache_;
+    CovCache cov_cache_;
 };
 
-void AnelloRosDriver::storeLastImuData(const double decoded_val[])
-{
-	last_linear_accel_.data[0] = static_cast<float>(decoded_val[1]);
-	last_linear_accel_.data[1] = static_cast<float>(decoded_val[2]);
-	last_linear_accel_.data[2] = static_cast<float>(decoded_val[3]);
-	last_angular_vel_.data[0]  = static_cast<float>(decoded_val[4]);
-	last_angular_vel_.data[1]  = static_cast<float>(decoded_val[5]);
-	last_angular_vel_.data[2]  = static_cast<float>(decoded_val[6]);
-}
+} // namespace anello
 
-void AnelloRosDriver::storeLastCovariances(const double decoded_val[])
-{
-	last_orientation_cov_.RollRoll    = decoded_val[13];
-	last_orientation_cov_.RollPitch   = decoded_val[17];
-	last_orientation_cov_.RollHeading = decoded_val[18];
-	last_orientation_cov_.PitchRoll   = decoded_val[17];
-	last_orientation_cov_.PitchPitch  = decoded_val[14];
-	last_orientation_cov_.PitchHeading= decoded_val[19];
-	last_orientation_cov_.HeadingRoll = decoded_val[18];
-	last_orientation_cov_.HeadingPitch= decoded_val[19];
-	last_orientation_cov_.HeadingHeading = decoded_val[15];
+RCLCPP_COMPONENTS_REGISTER_NODE(anello::AnelloRosDriver)
 
-	last_position_cov_.latlat = decoded_val[1];
-	last_position_cov_.latlon = decoded_val[4];
-	last_position_cov_.latalt = decoded_val[5];
-	last_position_cov_.lonlat = decoded_val[4];
-	last_position_cov_.lonlon = decoded_val[2];
-	last_position_cov_.lonalt = decoded_val[6];
-	last_position_cov_.altlat = decoded_val[5];
-	last_position_cov_.altlon = decoded_val[6];
-	last_position_cov_.altalt = decoded_val[3];
-}
-
-void AnelloRosDriver::pubRosImuAndNav(const double decoded_val[])
-{
-	//define ROS standard Imu msg and NavSatFix msg
-	auto ros_imu_msg = sensor_msgs::msg::Imu();
-	auto nav_msg = sensor_msgs::msg::NavSatFix();
-
-	//Conversion
-	double roll_rad = decoded_val[9] * d2r;
-	double pitch_rad = decoded_val[10] * d2r;
-	double heading_rad = decoded_val[11] * d2r;
-
-	double cy = cos(heading_rad * 0.5);
-	double sy = sin(heading_rad * 0.5);
-	double cp = cos(pitch_rad * 0.5);
-	double sp = sin(pitch_rad * 0.5);
-	double cr = cos(roll_rad * 0.5);
-	double sr = sin(roll_rad * 0.5);
-
-	//Stamp and frame
-	ros_imu_msg.header.stamp = this->now();
-	ros_imu_msg.header.frame_id = "anello_link";
-
-	nav_msg.header.stamp = this->now();
-	nav_msg.header.frame_id = "ins_link";
-
-	//Satellite Fix Status (NavSatFix)
-	nav_msg.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
-	nav_msg.status.service =
-		sensor_msgs::msg::NavSatStatus::SERVICE_GPS     |
-		sensor_msgs::msg::NavSatStatus::SERVICE_GLONASS |
-		sensor_msgs::msg::NavSatStatus::SERVICE_COMPASS |
-		sensor_msgs::msg::NavSatStatus::SERVICE_GALILEO;
-
-	//Quaternion orientation (Imu msg)
-	ros_imu_msg.orientation.x = sr*cp*cy - cr*sp*sy;
-	ros_imu_msg.orientation.y = cr*sp*cy + sr*cp*sy;
-	ros_imu_msg.orientation.z = cr*cp*sy - sr*sp*cy;
-	ros_imu_msg.orientation.w = cr*cp*cy + sr*sp*sy;
-
-	//Angular velocity (Imu msg)
-	ros_imu_msg.angular_velocity.x = last_angular_vel_.data[0] * static_cast<float>(d2r);
-	ros_imu_msg.angular_velocity.y = last_angular_vel_.data[1] * static_cast<float>(d2r);
-	ros_imu_msg.angular_velocity.z = last_angular_vel_.data[2] * static_cast<float>(d2r);
-
-	//Linear acceleration (Imu msg)
-	ros_imu_msg.linear_acceleration.x = last_linear_accel_.data[0] * g_accel;
-	ros_imu_msg.linear_acceleration.y = last_linear_accel_.data[1] * g_accel;
-	ros_imu_msg.linear_acceleration.z = last_linear_accel_.data[2] * g_accel;
-	
-	//Orientation covariance matrix (Imu msg)
-	ros_imu_msg.orientation_covariance[0] = last_orientation_cov_.RollRoll * d2r_squared;
-	ros_imu_msg.orientation_covariance[1] = last_orientation_cov_.RollPitch * d2r_squared;
-	ros_imu_msg.orientation_covariance[2] = last_orientation_cov_.RollHeading * d2r_squared;
-	ros_imu_msg.orientation_covariance[3] = last_orientation_cov_.PitchRoll * d2r_squared;
-	ros_imu_msg.orientation_covariance[4] = last_orientation_cov_.PitchPitch * d2r_squared;
-	ros_imu_msg.orientation_covariance[5] = last_orientation_cov_.PitchHeading * d2r_squared;
-	ros_imu_msg.orientation_covariance[6] = last_orientation_cov_.HeadingRoll * d2r_squared;
-	ros_imu_msg.orientation_covariance[7] = last_orientation_cov_.HeadingPitch * d2r_squared;
-	ros_imu_msg.orientation_covariance[8] = last_orientation_cov_.HeadingHeading * d2r_squared;
-
-	//Position covariance matrix (NavSatFix)					
-	nav_msg.position_covariance[0] = last_position_cov_.lonlon;   // C_ee
-	nav_msg.position_covariance[1] = last_position_cov_.latlon;    // C_en
-	nav_msg.position_covariance[2] = last_position_cov_.lonalt;   // C_eu
-
-	nav_msg.position_covariance[3] = last_position_cov_.latlon;   // C_ne
-	nav_msg.position_covariance[4] = last_position_cov_.latlat;  // C_nn
-	nav_msg.position_covariance[5] = last_position_cov_.latalt;    // C_nu
-
-	nav_msg.position_covariance[6] = last_position_cov_.lonalt;     // C_ue
-	nav_msg.position_covariance[7] = last_position_cov_.latalt;    // C_un
-	nav_msg.position_covariance[8] = last_position_cov_.altalt;     // C_uu
-
-	nav_msg.position_covariance_type = sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN;
-
-	//Lat, Long, Alt (NavSatFix)
-	nav_msg.latitude = decoded_val[3];
-	nav_msg.longitude = decoded_val[4];
-	nav_msg.altitude = decoded_val[5];
-	
-	//Angular velocity and linear acceleration covariances
-	for (int i = 0; i < 9; ++i) {
-		ros_imu_msg.angular_velocity_covariance[i]    = (i%4==0 ? GYRO_VARIANCE : 0.0);
-		ros_imu_msg.linear_acceleration_covariance[i] = (i%4==0 ? ACCEL_VARIANCE: 0.0);
-	} 
-
-	//Publish both messages
-	_ros_imu_pub->publish(ros_imu_msg);
-	_navfix_publisher->publish(nav_msg);
-}
-
-int main(int argc, char *argv[])
-{
-
-#if COMPILE_WITH_ROS2
-	rclcpp::init(argc, argv);
-	rclcpp::spin(std::make_shared<AnelloRosDriver>());
-	rclcpp::shutdown();
-#endif
-}
 
 /* State machine decoder for ASCII and RTCM messages
-*
- * Parameters:
- * a1buff_t *a1 : pointer to an a1buff object. This holds the current message candidate.
- * uint8_t data : This holds the next byte to be added to the buffer. If the byte is correct it is added. If it isnt the buffer is reset.
  *
- * Return
- * Outputs the status of the buffer
- * 0 = not ready
- * 1 = ASCII message ready
- * 5 = RTCM message ready
+ * Return:
+ *   0 = not ready
+ *   1 = ASCII message ready
+ *   5 = RTCM message ready
  */
-static int input_a1_data(a1buff_t *a1, uint8_t data, FILE *log_file)
+static int input_a1_data(a1buff_t *a1, uint8_t data)
 {
-	if (nullptr != log_file)
-	{
-		fprintf(log_file, "%c", data);
-	}
+    int ret = 0;
 
-	int ret = 0, i = 0;
+    if (a1->nbyte >= MAX_BUF_LEN)
+        a1->nbyte = 0;
 
-	// if length is at maximum reset buffer
-	if (a1->nbyte >= MAX_BUF_LEN)
-		a1->nbyte = 0;
+    // Detect correct start characters: #AP or 0xD3
+    if (a1->nbyte == 0 && !(data == '#' || data == 0xD3))
+    {
+        a1->nbyte = 0;
+        return 0;
+    }
+    if (a1->nbyte == 1 && !((data == 'A' && a1->buf[0] == '#') || a1->buf[0] == 0xD3))
+    {
+        a1->nbyte = 0;
+        return 0;
+    }
+    if (a1->nbyte == 2 && !((data == 'P' && a1->buf[1] == 'A' && a1->buf[0] == '#') || a1->buf[0] == 0xD3))
+    {
+        a1->nbyte = 0;
+        return 0;
+    }
 
-	// Detect correct start characters for message
-	/* #AP, 0xD3 */
-	if (a1->nbyte == 0 && !(data == '#' || data == 0xD3))
-	{
-		a1->nbyte = 0;
-		return 0;
-	}
-	if (a1->nbyte == 1 && !((data == 'A' && a1->buf[0] == '#') || a1->buf[0] == 0xD3))
-	{
-		a1->nbyte = 0;
-		return 0;
-	}
-	if (a1->nbyte == 2 && !((data == 'P' && a1->buf[1] == 'A' && a1->buf[0] == '#') || a1->buf[0] == 0xD3))
-	{
-		a1->nbyte = 0;
-		return 0;
-	}
+    if (a1->nbyte == 0)
+    {
+        memset(a1, 0, sizeof(a1buff_t));
+    }
 
-	// zero buffer when correct start char is detected before adding
-	if (a1->nbyte == 0)
-	{
-		memset(a1, 0, sizeof(a1buff_t));
-	}
+    if (a1->nbyte < 3)
+    {
+        a1->buf[a1->nbyte++] = data;
+        return 0;
+    }
 
-	// add start characters to buffer
-	if (a1->nbyte < 3)
-	{
-		a1->buf[a1->nbyte++] = data;
-		return 0;
-	}
+    if (a1->buf[0] != 0xD3)
+    {
+        // ASCII message
+        if (data == ',')
+        {
+            a1->loc[a1->nseg++] = a1->nbyte;
+            if (a1->nseg == 2)
+                a1->nlen = 0;
+        }
 
-	// if not RTCM message
-	if (a1->buf[0] != 0xD3)
-	{
-		// remember index of each delimiter to mark sections
-		if (data == ',')
-		{
-			a1->loc[a1->nseg++] = a1->nbyte;
-			if (a1->nseg == 2)
-			{
-				a1->nlen = 0;
-			}
-		}
+        a1->buf[a1->nbyte++] = data;
 
-		// add byte to buffer
-		a1->buf[a1->nbyte++] = data;
+        if (a1->nlen == 0)
+        {
+            if (data == '\r' || data == '\n')
+            {
+                if (a1->nbyte > 3 && a1->buf[a1->nbyte - 4] == '*')
+                {
+                    a1->loc[a1->nseg++] = a1->nbyte - 4;
+                    ret = 1;
+                }
+            }
+        }
+    }
+    else
+    {
+        // RTCM message
+        a1->buf[a1->nbyte++] = data;
+        a1->nlen = getbitu(a1->buf, 14, 10) + 3;
+        if (a1->nbyte >= a1->nlen + 3)
+        {
+            int i = 24;
+            a1->type = getbitu(a1->buf, i, 12);
+            i += 12;
 
-		// if statement is shorthand for 'is asc message?'
-		if (a1->nlen == 0)
-		{
-			/* check message end for complete asc message */
-			if (data == '\r' || data == '\n')
-			{
-				/* 1*74 */
-				if (a1->nbyte > 3 && a1->buf[a1->nbyte - 4] == '*')
-				{
-					a1->loc[a1->nseg++] = a1->nbyte - 4; // mark checksum value as seperator
-					ret = 1;							 // mark ready for read
-				}
-			}
-		}
-	}
-	else
-	{
-		/* rtcm data */
-		a1->buf[a1->nbyte++] = data;
-		a1->nlen = getbitu(a1->buf, 14, 10) + 3; /* length without parity */
-		if (a1->nbyte >= a1->nlen + 3)
-		{
-			i = 24;
-			a1->type = getbitu(a1->buf, i, 12);
-			i += 12;
-
-			/* check parity */
-			if (crc24q(a1->buf, a1->nlen) != getbitu(a1->buf, a1->nlen * 8, 24))
-			{
-				a1->crc = 1;
-			}
-			else
-			{
-				a1->crc = 0;
-				if (a1->type == 4058)
-				{
-					/* decode subtype */
-					a1->subtype = getbitu(a1->buf, i, 4);
-				}
-			}
-			ret = 5; /* rtcm valid message */
-		}
-	}
-	return ret;
+            if (crc24q(a1->buf, a1->nlen) != getbitu(a1->buf, a1->nlen * 8, 24))
+            {
+                a1->crc = 1;
+            }
+            else
+            {
+                a1->crc = 0;
+                if (a1->type == 4058)
+                    a1->subtype = getbitu(a1->buf, i, 4);
+            }
+            ret = 5;
+        }
+    }
+    return ret;
 }

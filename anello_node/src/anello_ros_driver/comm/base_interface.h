@@ -13,49 +13,34 @@
 #ifndef BASE_INTERFACE_H
 #define BASE_INTERFACE_H
 
-// enum with options UART and ETH
+#include <string>
+#include <cstdint>
+
 enum interface_type_t
 {
-	UART,
-	ETH
+    UART,
+    ETH
 };
 
-typedef struct
+struct interface_config_t
 {
-	interface_type_t type;
-	std::string data_port_name;
-	std::string config_port_name;
-
-	std::string remote_ip;
-	int local_data_port;
-	int local_config_port;
-	int local_odometer_port;
-    uint32_t baud_rate;
-} interface_config_t;
+    interface_type_t type = UART;
+    std::string data_port_name;
+    std::string config_port_name;
+    std::string remote_ip;
+    int local_data_port = 1111;
+    int local_config_port = 2222;
+    int local_odometer_port = 3333;
+    uint32_t baud_rate = 230400;
+};
 
 class base_interface
 {
-protected:
-    interface_config_t config;
-
 public:
-    /*
-     * Parameters:
-     * char *buf : char array that will be written over with as much anello unit data as possible
-     * size_t buf_len : size of the buffer in 'char *buf'
-     *
-     * Return:
-     * Number of bytes written 'char *buf'
-     */
+    virtual ~base_interface() = default;
+
     virtual size_t get_data(char *buf, size_t buf_len) { (void)buf; (void)buf_len; return 0; }
-    
-    /*
-     * Parameters:
-     * char *buf : char array that will be written to the connected device
-     * size_t buf_len : amount of bytes to be written to the port
-     *
-     */
-    virtual void write_data(const char *buf, size_t buf_len) { (void)buf; (void)buf_len; return; }
+    virtual void write_data(const char *buf, size_t buf_len) { (void)buf; (void)buf_len; }
 };
 
 #endif

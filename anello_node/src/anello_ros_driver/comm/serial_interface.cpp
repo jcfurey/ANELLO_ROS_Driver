@@ -6,9 +6,6 @@
  * Date:        7/1/23
  *
  * License:     MIT License
- *
- * Note:        set the baud rate in the constructor to default EVK baud of 921600.
- *              This can be changed in the constructor.
  ********************************************************************************/
 
 #include "../main_anello_ros_driver.h"
@@ -22,10 +19,10 @@
 #include <sys/ioctl.h>
 #include <dirent.h>
 #include <vector>
+#include <stdexcept>
 
 #include "serial_interface.h"
 
-#define DEBUG 0
 #define MAX_READ_NUM 1000
 #define SER_PORT_FLUSH_COUNT 20
 
@@ -42,13 +39,8 @@ void serial_interface::init(std::string portname, uint32_t baud_rate)
     this->baud_rate_ = baud_rate;
     this->portname = portname;
 
-
-    //Check for disabled port
-    if (strcmp(this->portname.c_str(), "OFF") == 0)
+    if (this->portname == "OFF")
     {
-#if DEBUG_SERIAL
-        DEBUG_PRINT("Serial port disabled");
-#endif
         this->port_enabled = false;
         return;
     }
@@ -56,88 +48,82 @@ void serial_interface::init(std::string portname, uint32_t baud_rate)
     this->usb_fd = open(this->portname.c_str(), O_RDWR);
     if (this->usb_fd < 0)
     {
-        ERROR_PRINT("file open error with port %s", this->portname.c_str());
-        exit(1);
+        throw std::runtime_error("Failed to open serial port: " + this->portname +
+                                 " (" + std::string(strerror(errno)) + ")");
     }
 
     struct termios options;
     memset(&options, 0, sizeof(options));
     if (tcgetattr(this->usb_fd, &options) != 0)
     {
-        ERROR_PRINT("Error %i from tcgetattr: %s\n", errno, strerror(errno));
-        exit(1);
+        close(this->usb_fd);
+        this->usb_fd = -1;
+        throw std::runtime_error("tcgetattr failed on " + this->portname +
+                                 ": " + std::string(strerror(errno)));
     }
 
-    options.c_cflag &= ~PARENB; // disable parity bit
-    options.c_cflag &= ~CSTOPB; // use one stop bit
+    options.c_cflag &= ~PARENB;
+    options.c_cflag &= ~CSTOPB;
     options.c_cflag &= ~CSIZE;
-    options.c_cflag |= CS8;      // 8-bit data
-    options.c_cflag &= ~CRTSCTS; // disable hardware flow control
-    options.c_iflag = 0; // disable software flow control
-    options.c_lflag = 0;         // no signaling characters, no echo
-    options.c_oflag = 0;         // no remapping, no delays
-    options.c_cc[VMIN] = 0;      // read doesn't block
+    options.c_cflag |= CS8;
+    options.c_cflag &= ~CRTSCTS;
+    options.c_iflag = 0;
+    options.c_lflag = 0;
+    options.c_oflag = 0;
+    options.c_cc[VMIN] = 0;
     options.c_cc[VTIME] = 5;     // 0.5 seconds read timeout
 
     speed_t speed;
-    switch(this->baud_rate_) {
+    switch (this->baud_rate_) {
+      case 115200:   speed = B115200;   break;
       case 230400:   speed = B230400;   break;
-      case 921600:   speed = B921600;   break; 
+      case 460800:   speed = B460800;   break;
+      case 921600:   speed = B921600;   break;
       default:
-        RCLCPP_WARN(rclcpp::get_logger("serial_interface"),
-                    "Unsupported baud %d, falling back to 230400", this->baud_rate_);
+        WARNING_PRINT("Unsupported baud rate %u, falling back to 230400", this->baud_rate_);
         speed = B230400;
     }
     cfsetispeed(&options, speed);
     cfsetospeed(&options, speed);
 
-    
-    // set the options
     if (tcsetattr(this->usb_fd, TCSANOW, &options) != 0)
     {
-        ERROR_PRINT("Error %i from tcsetattr: %s\n", errno, strerror(errno));
-        exit(1);
+        close(this->usb_fd);
+        this->usb_fd = -1;
+        throw std::runtime_error("tcsetattr failed on " + this->portname +
+                                 ": " + std::string(strerror(errno)));
     }
 
-    // Flush Port
     for (int i = 0; i < SER_PORT_FLUSH_COUNT; i++)
     {
         usleep(1000);
         ioctl(this->usb_fd, TCFLSH, 2);
     }
-#if DEBUG_SERIAL
-    DEBUG_PRINT("Serial port %s initialized", this->portname.c_str());
-#endif
+
     this->port_enabled = true;
 }
 
 size_t serial_interface::get_data(char *buf, size_t buf_len)
 {
-    if (!this->port_enabled)
+    if (!this->port_enabled || this->usb_fd < 0)
     {
         return 0;
     }
-    if (this->usb_fd < 0)
-    {
-        ERROR_PRINT("ANELLO ROS driver serial port file descriptor not defined");
-        exit(1);
-    }
 
-    size_t bytes_read = read(this->usb_fd, buf, (buf_len * sizeof(char)) - 1);
+    ssize_t bytes_read = read(this->usb_fd, buf, (buf_len * sizeof(char)) - 1);
+    if (bytes_read < 0)
+    {
+        return 0;
+    }
     buf[bytes_read] = '\0';
-    return bytes_read;
+    return static_cast<size_t>(bytes_read);
 }
 
 size_t serial_interface::get_data(char *buf, size_t buf_len, int timeout)
 {
-    if (!this->port_enabled)
+    if (!this->port_enabled || this->usb_fd < 0)
     {
         return 0;
-    }
-    if (this->usb_fd < 0)
-    {
-        ERROR_PRINT("ANELLO ROS driver serial port file descriptor not defined");
-        exit(1);
     }
 
     fd_set readSet;
@@ -148,13 +134,8 @@ size_t serial_interface::get_data(char *buf, size_t buf_len, int timeout)
     tv.tv_sec = 0;
     tv.tv_usec = timeout * 1000;
 
-    int ready = select(this->usb_fd + 1, &readSet, NULL, NULL, &tv);
-    if (ready < 0)
-    {
-        ERROR_PRINT("Error from select: %s\n", strerror(errno));
-        exit(1);
-    }
-    else if (ready == 0)
+    int ready = select(this->usb_fd + 1, &readSet, nullptr, nullptr, &tv);
+    if (ready <= 0)
     {
         return 0;
     }
@@ -162,9 +143,9 @@ size_t serial_interface::get_data(char *buf, size_t buf_len, int timeout)
     return serial_interface::get_data(buf, buf_len);
 }
 
-void serial_interface::write_data(const char *buf, size_t buf_len) 
-{ 
-    if (!this->port_enabled)
+void serial_interface::write_data(const char *buf, size_t buf_len)
+{
+    if (!this->port_enabled || this->usb_fd < 0)
     {
         return;
     }
@@ -189,6 +170,7 @@ void serial_interface::close_port()
         close(this->usb_fd);
         this->usb_fd = -1;
     }
+    this->port_enabled = false;
 }
 
 serial_interface::~serial_interface()
