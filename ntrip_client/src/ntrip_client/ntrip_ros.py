@@ -39,7 +39,8 @@ class NTRIPRos(Node):
                 ('ca_cert', 'None'),
                 ('rtcm_frame_id', 'odom'),
                 ('reconnect_attempt_max', NTRIPClient.DEFAULT_RECONNECT_ATTEMPT_MAX),
-                ('reconnect_attempt_wait_seconds', NTRIPClient.DEFAULT_RECONNECT_ATEMPT_WAIT_SECONDS),
+                ('reconnect_attempt_wait_seconds',
+                 NTRIPClient.DEFAULT_RECONNECT_ATEMPT_WAIT_SECONDS),
                 ('rtcm_timeout_seconds', NTRIPClient.DEFAULT_RTCM_TIMEOUT_SECONDS),
             ]
         )
@@ -99,9 +100,12 @@ class NTRIPRos(Node):
         if self._client.ca_cert == 'None':
             self._client.ca_cert = None
 
-        self._client.reconnect_attempt_max = self.get_parameter('reconnect_attempt_max').value
-        self._client.reconnect_attempt_wait_seconds = self.get_parameter('reconnect_attempt_wait_seconds').value
-        self._client.rtcm_timeout_seconds = self.get_parameter('rtcm_timeout_seconds').value
+        self._client.reconnect_attempt_max = \
+            self.get_parameter('reconnect_attempt_max').value
+        self._client.reconnect_attempt_wait_seconds = \
+            self.get_parameter('reconnect_attempt_wait_seconds').value
+        self._client.rtcm_timeout_seconds = \
+            self.get_parameter('rtcm_timeout_seconds').value
 
     def run(self):
         if not self._client.connect():
