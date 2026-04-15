@@ -2,6 +2,10 @@
 
 ROS2 driver for [ANELLO Photonics](https://www.anellophotonics.com/) GNSS/INS devices.
 
+**New to ANELLO?** See the [Integration Guide](doc/integration_guide.md) for
+step-by-step instructions on wiring, configuring, and integrating the ANELLO
+EVK with your robotics platform (including `robot_localization` and Nav2).
+
 ## Supported Products
 
 | Product | Firmware | Baud Rate |
@@ -356,6 +360,11 @@ This runs `ament_lint_auto` (copyright, cppcheck, cpplint, flake8, pep257, xmlli
               |  caster -> ntrip_client/rtcm -> driver   |
               +------------------------------------------+
 ```
+
+## Further Reading
+
+- [Integration Guide](doc/integration_guide.md) - Hardware setup, URDF, robot_localization, Nav2, NTRIP, odometer input, troubleshooting
+- [ANELLO Developer Manual](https://docs-a1.readthedocs.io/en/latest/) - Firmware documentation, ASCII/RTCM protocol reference
 
 ## License
 
