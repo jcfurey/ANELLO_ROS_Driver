@@ -2,7 +2,7 @@
 #define VERSION_H
 
 #ifndef MAJOR_VERSION
-#define MAJOR_VERSION 2
+#define MAJOR_VERSION 3
 #endif
 
 #ifndef MINOR_VERSION
@@ -10,11 +10,27 @@
 #endif
 
 #ifndef PATCH_VERSION
-#define PATCH_VERSION 1
+#define PATCH_VERSION 0
 #endif
 
-
 /*
+v3.0.0 : Major ROS2 standards upgrade
+            1. Composable node (rclcpp_components)
+            2. Standard sensor_msgs/Imu and NavSatFix publishing
+            3. TF2 transform broadcasting
+            4. diagnostic_updater integration
+            5. SensorDataQoS for all sensor publishers
+            6. Header timestamps on all custom messages
+            7. Configurable frame IDs via parameters
+            8. APCOV covariance message and decoder
+            9. CmdAndRsp service for device commands
+            10. Baud rate as runtime parameter
+            11. Python launch file with full parameter support
+            12. Communication layer: exceptions instead of exit()
+            13. Fix critical data_port init bug
+            14. flake8-clean Python code (PEP 8)
+            15. ament_lint_auto test framework
+
 v2.0.1 : Bring in v1.3.4 changes to ros2
 
 v2.0.0 : ROS2 port of the anello_ros_driver
@@ -48,8 +64,6 @@ v1.1.0 : Feature List:
             3. Add launch file and parameter support
 
 v1.0.0 : Initial basic feature set
-
-v1.1.0 : Push changes to main
 
 */
 
