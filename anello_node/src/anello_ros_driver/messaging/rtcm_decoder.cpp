@@ -25,7 +25,7 @@ void decode_rtcm_imu_msg(double imu[], a1buff_t a1buff)
 
     if (a1buff.nlen >= 61)
     {
-        memcpy((uint8_t *)&rtcm_apimu, a1buff.buf + 5, sizeof(rtcm_apimu_t));
+        memcpy(reinterpret_cast<uint8_t *>(&rtcm_apimu), a1buff.buf + 5, sizeof(rtcm_apimu_t));
         imu[0] = rtcm_apimu.MCU_Time * 1e-6;
         imu[1] = rtcm_apimu.AX * 1.0 / 0x08888889;    /* fx */
         imu[2] = rtcm_apimu.AY * 1.0 / 0x08888889;    /* fy */
@@ -41,7 +41,7 @@ void decode_rtcm_imu_msg(double imu[], a1buff_t a1buff)
     }
     else
     {
-        memcpy((uint8_t *)&rtcm_old_apimu, a1buff.buf + 5, sizeof(rtcm_old_apimu_t));
+        memcpy(reinterpret_cast<uint8_t *>(&rtcm_old_apimu), a1buff.buf + 5, sizeof(rtcm_old_apimu_t));
         imu[0] = rtcm_old_apimu.MCU_Time * 1e-6;
         imu[1] = rtcm_old_apimu.AX * 1.0 / 0x08888889;    /* fx */
         imu[2] = rtcm_old_apimu.AY * 1.0 / 0x08888889;    /* fy */
@@ -60,7 +60,7 @@ void decode_rtcm_im1_msg(double im1[], a1buff_t a1buff)
 {
     rtcm_apim1_t rtcm_apim1 = {0};
 
-    memcpy((uint8_t *)&rtcm_apim1, a1buff.buf + 5, sizeof(rtcm_apim1_t));
+    memcpy(reinterpret_cast<uint8_t *>(&rtcm_apim1), a1buff.buf + 5, sizeof(rtcm_apim1_t));
     im1[0] = rtcm_apim1.MCU_Time * 1e-6;
     im1[1] = rtcm_apim1.AX * 1.0 / 0x08888889;    /* fx */
     im1[2] = rtcm_apim1.AY * 1.0 / 0x08888889;    /* fy */
@@ -77,7 +77,7 @@ void decode_rtcm_ins_msg(double ins[], a1buff_t a1buff)
 {
     rtcm_apins_t rtcm_apins = {0};
 
-    memcpy((uint8_t *)&rtcm_apins, a1buff.buf + 5, sizeof(rtcm_apins_t));
+    memcpy(reinterpret_cast<uint8_t *>(&rtcm_apins), a1buff.buf + 5, sizeof(rtcm_apins_t));
 
     ins[0] = rtcm_apins.Time * 1e-6; /* MCU Time */
     ins[1] = rtcm_apins.GPS_Time;    /* GPS Time */
@@ -101,7 +101,7 @@ int decode_rtcm_gps_msg(double gps[], a1buff_t a1buff)
 {
     rtcm_apgps_t rtcm_apgps = {0};
 
-    memcpy((uint8_t *)&rtcm_apgps, a1buff.buf + 5, sizeof(rtcm_apgps_t));
+    memcpy(reinterpret_cast<uint8_t *>(&rtcm_apgps), a1buff.buf + 5, sizeof(rtcm_apgps_t));
     gps[0] = rtcm_apgps.Time * 1e-6;           /* time MCU */
     gps[1] = rtcm_apgps.GPS_Time;              /* GPS ns */
     gps[2] = rtcm_apgps.Latitude * 1.0e-7;     /* lat */
@@ -134,7 +134,7 @@ void decode_rtcm_hdg_msg(double hdr[], a1buff_t a1buff)
 {
     rtcm_aphdr_t rtcm_aphdr = {0};
 
-    memcpy((uint8_t *)&rtcm_aphdr, a1buff.buf + 5, sizeof(rtcm_aphdr_t));
+    memcpy(reinterpret_cast<uint8_t *>(&rtcm_aphdr), a1buff.buf + 5, sizeof(rtcm_aphdr_t));
     hdr[0] = rtcm_aphdr.MCU_Time * 1e-6; /* time MCU */
     hdr[1] = rtcm_aphdr.GPS_Time;        /* GPS ns */
 
@@ -153,7 +153,7 @@ void decode_rtcm_cov_msg(double cov[], a1buff_t a1buff)
 {
     rtcm_apcov_t rtcm_apcov = {0};
 
-    memcpy((uint8_t *)&rtcm_apcov, a1buff.buf + 5, sizeof(rtcm_apcov_t));
+    memcpy(reinterpret_cast<uint8_t *>(&rtcm_apcov), a1buff.buf + 5, sizeof(rtcm_apcov_t));
     cov[0] = rtcm_apcov.Time * 1e-6; /* time MCU */
     cov[1] = rtcm_apcov.covLatLat;   /* lat lat */
     cov[2] = rtcm_apcov.covLonLon;   /* lon lon */

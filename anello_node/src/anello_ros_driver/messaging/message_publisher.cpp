@@ -13,9 +13,11 @@
 #include "health_message.h"
 #include "../bit_tools.h"
 
-#include <string.h>
+#include <cstring>
+#include <cmath>
 #include <ctime>
 #include <iomanip>
+#include <sstream>
 
 #include <rclcpp/rclcpp.hpp>
 

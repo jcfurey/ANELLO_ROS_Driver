@@ -221,8 +221,8 @@ void health_message::set_baseline(double baseline)
 
 void health_message::get_current_diff(double *gps_diff_out, double *hdg_diff_out)
 {
-    double hdg_ins_diff = abs(this->ins_heading - this->hdg_heading);
-    double gps_ins_diff = abs(this->ins_heading - this->gps_heading);
+    double hdg_ins_diff = std::fabs(this->ins_heading - this->hdg_heading);
+    double gps_ins_diff = std::fabs(this->ins_heading - this->gps_heading);
 
     if (hdg_ins_diff > 180)
         hdg_ins_diff = 360 - hdg_ins_diff;
@@ -336,7 +336,7 @@ void health_message::get_csv_line(double *llh, char *buffer, int len)
     double ins_gps_heading_diff, ins_hdg_heading_diff;
     this->get_current_diff(&ins_gps_heading_diff, &ins_hdg_heading_diff);
 
-    sprintf(buffer, "%10.4f,%14.9f,%14.9f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%i,%i,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%i,%i,%i,%i,%i,%i,\n",
+    snprintf(buffer, len, "%10.4f,%14.9f,%14.9f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%i,%i,%10.4f,%10.4f,%10.4f,%10.4f,%10.4f,%i,%i,%i,%i,%i,%i,\n",
                                                                                                     this->cur_imu_time,
                                                                                                     llh[0], llh[1], llh[2],
                                                                                                     this->wz_mems_moving_average, this->wz_fog_moving_average, 

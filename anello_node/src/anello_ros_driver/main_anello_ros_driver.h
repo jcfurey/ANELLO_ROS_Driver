@@ -57,10 +57,6 @@
 #define DEBUG_SUBSCRIBERS 0
 #endif
 
-#ifndef OLD_MESSAGING
-#define OLD_MESSAGING 1
-#endif
-
 #define DEBUG_PRINT(...) RCLCPP_DEBUG(rclcpp::get_logger("anello_ros_driver"), __VA_ARGS__)
 #define ERROR_PRINT(...) RCLCPP_ERROR(rclcpp::get_logger("anello_ros_driver"), __VA_ARGS__)
 #define WARNING_PRINT(...) RCLCPP_WARN(rclcpp::get_logger("anello_ros_driver"), __VA_ARGS__)
