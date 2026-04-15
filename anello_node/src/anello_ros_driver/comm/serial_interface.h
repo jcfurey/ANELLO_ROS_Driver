@@ -104,7 +104,7 @@ public:
      * Return:
      * string containing the port name
      */
-    const std::string get_portname();
+    const std::string get_portname() const;
 
     /*
      * Parameters:
