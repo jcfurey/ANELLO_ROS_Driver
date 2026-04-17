@@ -8,11 +8,10 @@
  * Date:        8/18/23
  *
  * License:     MIT License
- *
- * Note:        
  ********************************************************************************/
 
 #include <cstdint>
+#include <vector>
 
 #ifndef NTRIP_BUFFER_SIZE
 #define NTRIP_BUFFER_SIZE 4*180
@@ -20,17 +19,17 @@
 
 class port_buffer {
 private:
-    bool read_ready;
-    uint8_t *buffer;
-	uint32_t bytes_used;
+    bool read_ready = false;
+    std::vector<uint8_t> buffer;
+    uint32_t bytes_used = 0;
 public:
-	port_buffer();
-	~port_buffer();
-	void add_data_to_buffer(const uint8_t *buf, int len);
-	void set_read_ready_false();
-	void clear_buffer();
-	int get_buffer_length();
-	const uint8_t *get_buffer();
+    port_buffer();
+    ~port_buffer() = default;
+    void add_data_to_buffer(const uint8_t *buf, int len);
+    void set_read_ready_false();
+    void clear_buffer();
+    int get_buffer_length();
+    const uint8_t *get_buffer();
     bool is_read_ready();
 };
 

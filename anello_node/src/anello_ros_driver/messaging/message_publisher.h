@@ -21,7 +21,7 @@ void publish_ins(double *ins, ins_pub_t pub, rclcpp::Time stamp, const std::stri
 void publish_gps(double *gps, gps_pub_t pub, rclcpp::Time stamp, const std::string &frame_id);
 void publish_gp2(double *gp2, gps_pub_t pub, rclcpp::Time stamp, const std::string &frame_id);
 void publish_hdr(double *hdg, hdg_pub_t pub, rclcpp::Time stamp, const std::string &frame_id);
-void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time);
+void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time, const std::string &frame_id);
 void publish_health(const health_message *health_msg, health_pub_t pub, rclcpp::Time stamp);
 void publish_cov(double *cov, apcov_pub_t pub, rclcpp::Time stamp, const std::string &frame_id);
 

@@ -11,6 +11,7 @@
 #include "../main_anello_ros_driver.h"
 #include "ethernet_interface.h"
 
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>

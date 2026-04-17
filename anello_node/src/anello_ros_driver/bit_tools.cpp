@@ -96,8 +96,8 @@ extern int getbits(const unsigned char *buff, int pos, int len)
 {
     unsigned int bits = getbitu(buff, pos, len);
     if (len <= 0 || 32 <= len || !(bits & (1u << (len - 1))))
-        return (int)bits;
-    return (int)(bits | (~0u << len)); /* extend sign */
+        return static_cast<int>(bits);
+    return static_cast<int>(bits | (~0u << len)); /* extend sign */
 }
 
 /* checksum ------------------------------------------------------------------*/
@@ -124,7 +124,7 @@ extern int checksum(unsigned char *buff, int len)
         ck_sum ^= buff[i];
     }
     // Convert number to hex string with width 2
-    ck << std::hex << std::setw(2) << std::setfill('0') << (int)ck_sum;
+    ck << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(ck_sum);
     hexstring = ck.str();
 
     // string stream creates lower case values
@@ -150,7 +150,7 @@ extern std::string compute_checksum(const char *buff, int len)
     }
 
     //ensure two digits and add 0
-    ck << std::hex << std::setw(2) << std::setfill('0') << (int)ck_sum;
+    ck << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(ck_sum);
     ck_final = ck.str();
 
     //make uppercase
@@ -176,8 +176,6 @@ extern int parse_fields(char *const buffer, char **val)
 	/* parse fields */
 	for (p = buffer; *p && n < MAXFIELD; p = q + 1)
 	{
-		if (p == NULL)
-			break;
 		if ((q = strchr(p, ',')) || (q = strchr(p, '*')) || (q = strchr(p, '\n')) || (q = strchr(p, '\r')))
 		{
 			val[n++] = p;
@@ -186,7 +184,7 @@ extern int parse_fields(char *const buffer, char **val)
 		else
 			break;
 	}
-	if (p != NULL)
+	if (p != NULL && n < MAXFIELD)
 	{
 		val[n++] = p;
 	}

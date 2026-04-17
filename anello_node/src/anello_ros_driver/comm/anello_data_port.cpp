@@ -25,7 +25,7 @@
 
 anello_data_port::anello_data_port(const interface_config_t *config)
     : uart_port(),
-      ethernet_port(config->remote_ip, 1, config->local_data_port)
+      ethernet_port(config->remote_ip, 1, config->local_data_port)  // remote port 1 = ANELLO data channel
 {
     this->config = *config;
     this->decode_success = false;

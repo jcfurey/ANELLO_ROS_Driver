@@ -33,12 +33,12 @@
 #include <mavros_msgs/msg/rtcm.hpp>
 #include <std_msgs/msg/header.hpp>
 
-void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time)
+void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time, const std::string &frame_id)
 {
     std_msgs::msg::Header msg_header;
     nmea_msgs::msg::Sentence gga_message;
 
-    msg_header.frame_id = "gnss_link";
+    msg_header.frame_id = frame_id;
     msg_header.stamp = time;
 
     std::ostringstream gngga_message;

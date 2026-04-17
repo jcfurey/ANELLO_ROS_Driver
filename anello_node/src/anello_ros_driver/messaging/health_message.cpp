@@ -237,12 +237,12 @@ void health_message::get_current_diff(double *gps_diff_out, double *hdg_diff_out
 //TODO: Implement baseline check
 bool health_message::is_baseline_correct()
 {
-    return (abs(this->hdg_baseline - this->configured_baseline) < BASELINE_ACC_THRESHOLD) && (abs(this->wz_fog_moving_average) < 5);
+    return (std::fabs(this->hdg_baseline - this->configured_baseline) < BASELINE_ACC_THRESHOLD) && (std::fabs(this->wz_fog_moving_average) < 5);
 }
 
 bool health_message::is_single_antenna_heading_valid()
 {
-    return (this->gps_heading_acc < GPS_HEADING_ACC_GOOD_THRESHOLD) && (abs(this->wz_fog_moving_average) < 5);
+    return (this->gps_heading_acc < GPS_HEADING_ACC_GOOD_THRESHOLD) && (std::fabs(this->wz_fog_moving_average) < 5);
 }
 
 bool health_message::has_rtk_fix() const

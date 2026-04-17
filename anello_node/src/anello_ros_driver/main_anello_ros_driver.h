@@ -37,26 +37,6 @@
 #define MAX_BUF_LEN (1200)
 #endif
 
-#ifndef DEBUG_MAIN
-#define DEBUG_MAIN 0
-#endif
-
-#ifndef DEBUG_SERIAL
-#define DEBUG_SERIAL 0
-#endif
-
-#ifndef DEBUG_ETHERNET
-#define DEBUG_ETHERNET 0
-#endif
-
-#ifndef DEBUG_PUBLISHERS
-#define DEBUG_PUBLISHERS 0
-#endif
-
-#ifndef DEBUG_SUBSCRIBERS
-#define DEBUG_SUBSCRIBERS 0
-#endif
-
 #define DEBUG_PRINT(...) RCLCPP_DEBUG(rclcpp::get_logger("anello_ros_driver"), __VA_ARGS__)
 #define ERROR_PRINT(...) RCLCPP_ERROR(rclcpp::get_logger("anello_ros_driver"), __VA_ARGS__)
 #define WARNING_PRINT(...) RCLCPP_WARN(rclcpp::get_logger("anello_ros_driver"), __VA_ARGS__)

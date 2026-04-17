@@ -1,85 +1,82 @@
+<!-- Legacy XML launch file. Prefer anello_driver.launch.py for new deployments. -->
 <launch>
-    <!-- Set the COM_TYPE to UART or ETH -->
-    <arg name="anello_com_type" default="UART"/>
+    <!-- Communication type: UART or ETH -->
+    <arg name="com_type" default="UART"/>
 
-    <!-- Uart port names -->
-    <arg name="anello_uart_data_port" default="AUTO"/>
-    <arg name="anello_uart_config_port" default="AUTO"/>
+    <!-- UART port names (use AUTO for auto-detection, OFF to disable config port) -->
+    <arg name="uart_data_port" default="AUTO"/>
+    <arg name="uart_config_port" default="AUTO"/>
 
-    <!-- Ethernet port names -->
-    <arg name="anello_remote_ip" default="192.168.1.111"/>
-    <arg name="anello_local_data_port" default="1111"/>
-    <arg name="anello_local_config_port" default="2222"/>
-    <arg name="anello_local_odometer_port" default="3333"/>
+    <!-- Ethernet settings -->
+    <arg name="remote_ip" default="192.168.1.111"/>
+    <arg name="local_data_port" default="1111"/>
+    <arg name="local_config_port" default="2222"/>
+    <arg name="local_odometer_port" default="3333"/>
 
-    <!-- Baud rate -->
+    <!-- Serial baud rate (230400 for GNSS INS/IMU+, 921600 for EVK) -->
     <arg name="baud_rate" default="230400"/>
 
-    <!--Launch ANELLO ros driver-->
-    <!--Update data and config port values to the ports in your system-->
+    <!-- Frame IDs -->
+    <arg name="frame_id_imu" default="imu_link"/>
+    <arg name="frame_id_ins" default="ins_link"/>
+    <arg name="frame_id_gnss" default="gnss_link"/>
+    <arg name="frame_id_hdg" default="gnss_link"/>
+
+    <!-- TF broadcasting -->
+    <arg name="publish_tf" default="true"/>
+    <arg name="tf_parent_frame" default="odom"/>
+
+    <!-- Polling interval (ms) -->
+    <arg name="poll_interval_ms" default="5"/>
+
+    <!-- ANELLO driver node -->
     <node name="anello_ros_driver" pkg="anello_ros_driver" exec="anello_ros_driver_node" output="screen">
-        <param name="anello_com_type" value="$(var anello_com_type)"/>
-        <param name="anello_uart_data_port" value="$(var anello_uart_data_port)"/>
-        <param name="anello_uart_config_port" value="$(var anello_uart_config_port)"/>
-        <param name="anello_remote_ip" value="$(var anello_remote_ip)"/>
-        <param name="anello_local_data_port" value="$(var anello_local_data_port)"/>
-        <param name="anello_local_config_port" value="$(var anello_local_config_port)"/>
-        <param name="anello_local_odometer_port" value="$(var anello_local_odometer_port)"/>
+        <param name="com_type" value="$(var com_type)"/>
+        <param name="uart_data_port" value="$(var uart_data_port)"/>
+        <param name="uart_config_port" value="$(var uart_config_port)"/>
         <param name="baud_rate" value="$(var baud_rate)"/>
+        <param name="remote_ip" value="$(var remote_ip)"/>
+        <param name="local_data_port" value="$(var local_data_port)"/>
+        <param name="local_config_port" value="$(var local_config_port)"/>
+        <param name="local_odometer_port" value="$(var local_odometer_port)"/>
+        <param name="frame_id.imu" value="$(var frame_id_imu)"/>
+        <param name="frame_id.ins" value="$(var frame_id_ins)"/>
+        <param name="frame_id.gnss" value="$(var frame_id_gnss)"/>
+        <param name="frame_id.hdg" value="$(var frame_id_hdg)"/>
+        <param name="publish_tf" value="$(var publish_tf)"/>
+        <param name="tf_parent_frame" value="$(var tf_parent_frame)"/>
+        <param name="poll_interval_ms" value="$(var poll_interval_ms)"/>
     </node>
 
-    <!-- NTRIP CLIENT PARAMTERS -->
+    <!-- NTRIP client parameters -->
     <arg name="host" default="127.0.0.1"/>
-    <arg name="port" default="1111"/>
-    <arg name="mountpoint" default="AUTO"/>
-    <arg name="authenticate" default="true"/>
-    <arg name="username" default="username"/>
-    <arg name="password" default="password"/>
+    <arg name="port" default="2101"/>
+    <arg name="mountpoint" default=""/>
+    <arg name="authenticate" default="false"/>
+    <arg name="username" default=""/>
+    <arg name="password" default=""/>
     <arg name="ntrip_version" default=""/>
     <arg name="ssl" default="false"/>
     <arg name="cert" default="None"/>
     <arg name="key" default="None"/>
     <arg name="ca_cert" default="None"/>
-    <arg name="debug" default="false"/>
-    <arg name="rtcm_message_package" default="mavros_msgs"/>
 
-    <node name="ntrip_client_node" pkg="ntrip_client" exec="ntrip_ros" output="screen" namespace="ntrip_client">
-        <!-- Required parameters used to connect to the NTRIP server -->
-        <param name="host"       value="$(var host)" />
-        <param name="port"       value="$(var port)" />
-        <param name="mountpoint" value="$(var mountpoint)" />
-
-        <!-- Optional parameter that will set the NTRIP version in the initial HTTP request to the NTRIP caster. -->
-        <param name="ntrip_version" value="$(var ntrip_version)" />
-
-        <!-- If this is set to true, we will read the username and password and attempt to authenticate. If not, we will attempt to connect unauthenticated -->
-        <param name="authenticate" value="$(var authenticate)" />
-
-        <!-- If authenticate is set to true, we will use these to authenticate with the server -->
-        <param name="username" value="$(var username)" />
-        <param name="password" value="$(var password)" />
-
-        <!-- Whether to connect with SSL. cert, key, and ca_cert options will only take effect if this is true -->
-        <param name="ssl" value="$(var ssl)" />
-
-        <!-- If the NTRIP caster uses cert based authentication, you can specify the cert and keys to use with these options -->
-        <param name="cert" value="$(var cert)" />
-        <param name="key"  value="$(var key)" />
-
-        <!-- If the NTRIP caster uses self signed certs, or you need to use a different CA chain, specify the path to the file here -->
-        <param name="ca_cert" value="$(var ca_cert)" />
-
-        <!-- Not sure if this will be looked at, but this frame ID will be added to the RTCM messages published by this node -->
-        <param name="rtcm_frame_id" value="odom" />
-
-        <!-- Will affect how many times the node will attempt to reconnect before exiting, and how long it will wait in between attempts when a reconnect occurs -->
-        <param name="reconnect_attempt_max" value="10" />
-        <param name="reconnect_attempt_wait_seconds" value="5" />
-
-        <!-- How many seconds is acceptable in between receiving RTCM. If RTCM is not received for this duration, the node will attempt to reconnect -->
-        <param name="rtcm_timeout_seconds" value="4" />
-
-        <!-- Uncomment the following section and replace "/gx5/nmea/sentence" with the topic you are sending NMEA on if it is not the one we requested -->
-        <!--<remap from="/ntrip_client/nmea" to="/gx5/nmea/sentence" />-->
+    <!-- NTRIP client node (no namespace — topics are already prefixed in the node) -->
+    <node name="ntrip_client" pkg="ntrip_client" exec="ntrip_ros" output="screen">
+        <param name="host"       value="$(var host)"/>
+        <param name="port"       value="$(var port)"/>
+        <param name="mountpoint" value="$(var mountpoint)"/>
+        <param name="ntrip_version" value="$(var ntrip_version)"/>
+        <param name="authenticate" value="$(var authenticate)"/>
+        <param name="username" value="$(var username)"/>
+        <param name="password" value="$(var password)"/>
+        <param name="ssl" value="$(var ssl)"/>
+        <param name="cert" value="$(var cert)"/>
+        <param name="key"  value="$(var key)"/>
+        <param name="ca_cert" value="$(var ca_cert)"/>
+        <param name="rtcm_frame_id" value="odom"/>
+        <param name="reconnect_attempt_max" value="10"/>
+        <param name="reconnect_attempt_wait_seconds" value="5"/>
+        <param name="rtcm_timeout_seconds" value="4"/>
     </node>
 </launch>

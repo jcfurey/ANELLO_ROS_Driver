@@ -13,6 +13,7 @@
 
 #include <fcntl.h>
 #include <termios.h>
+#include <cerrno>
 #include <cstring>
 #include <unistd.h>
 #include <string>
@@ -149,7 +150,11 @@ void serial_interface::write_data(const char *buf, size_t buf_len)
     {
         return;
     }
-    write(usb_fd, buf, buf_len);
+    ssize_t written = write(usb_fd, buf, buf_len);
+    if (written < 0 || static_cast<size_t>(written) != buf_len)
+    {
+        WARNING_PRINT("Serial write: expected %zu bytes, wrote %zd", buf_len, written);
+    }
 }
 
 const std::string serial_interface::get_portname() const

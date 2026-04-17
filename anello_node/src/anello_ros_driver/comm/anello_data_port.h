@@ -21,11 +21,11 @@
 class anello_data_port
 {
 private:
-    bool decode_success;
-    bool auto_detect;
+    bool decode_success = false;
+    bool auto_detect = false;
     std::vector<std::string> port_names;
-    uint32_t port_index;
-    int fail_count;
+    uint32_t port_index = 0;
+    int fail_count = 0;
     
     interface_config_t config;
     serial_interface uart_port;

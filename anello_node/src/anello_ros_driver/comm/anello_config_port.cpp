@@ -25,7 +25,7 @@
 
 anello_config_port::anello_config_port(const interface_config_t *config)
     : uart_port(),
-      ethernet_port(config->remote_ip, 2, config->local_config_port)
+      ethernet_port(config->remote_ip, 2, config->local_config_port)  // remote port 2 = ANELLO config channel
 {
     this->config = *config;
 }
@@ -91,7 +91,7 @@ void anello_config_port::init_uart()
                     char buf[100] = {0};
 
                     this->uart_port.get_data(buf, 100, 10);
-                    this->uart_port.write_data(command.c_str(), command.length() * sizeof(char));
+                    this->uart_port.write_data(command.c_str(), command.length());
                     usleep(500 * 1000);
                     this->uart_port.get_data(buf, 100, 10);
 
@@ -138,7 +138,7 @@ void anello_config_port::init_ethernet()
     std::string command = "#APPNG*48\r\n";
     char buf[100] = {0};
 
-    this->ethernet_port.write_data(command.c_str(), command.length() * sizeof(char));
+    this->ethernet_port.write_data(command.c_str(), command.length());
     usleep(500 * 1000);
     this->ethernet_port.get_data(buf, 100);
 }
@@ -185,7 +185,7 @@ double anello_config_port::get_baseline()
     char *field_array[MAXFIELD];
     char buf[100] = {0};
 
-    this->write_data(command.c_str(), command.length() * sizeof(char));
+    this->write_data(command.c_str(), command.length());
     usleep(500 * 1000);
     this->get_data(buf, 100);
 

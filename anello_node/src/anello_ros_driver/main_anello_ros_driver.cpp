@@ -284,9 +284,13 @@ private:
             usleep(2000);
         }
 
-        res->response = response;
+        if (response.empty()) {
+            res->response = "ERROR: no response from device (timeout)";
+        } else {
+            res->response = response;
+        }
         RCLCPP_DEBUG(get_logger(), "send_cmd: sent='%s' got='%s'",
-                     full.c_str(), response.c_str());
+                     full.c_str(), res->response.c_str());
     }
 
 
@@ -408,7 +412,7 @@ private:
                 {
                     decode_ascii_gps(val, decoded_val);
                     publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
-                    publish_gga(decoded_val, pub_gga_, stamp);
+                    publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
                     health_msg_.add_gps_message(decoded_val);
                     is_ok = true;
                 }
@@ -491,7 +495,7 @@ private:
             int ant_id = decode_rtcm_gps_msg(decoded_val, a1buff_);
             if (GPS1 == ant_id) {
                 publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
-                publish_gga(decoded_val, pub_gga_, stamp);
+                publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
                 health_msg_.add_gps_message(decoded_val);
             } else {
                 publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);

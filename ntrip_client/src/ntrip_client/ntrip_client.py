@@ -28,7 +28,7 @@ class NTRIPClient:
 
     # Public constants
     DEFAULT_RECONNECT_ATTEMPT_MAX = 10
-    DEFAULT_RECONNECT_ATEMPT_WAIT_SECONDS = 5
+    DEFAULT_RECONNECT_ATTEMPT_WAIT_SECONDS = 5
     DEFAULT_RTCM_TIMEOUT_SECONDS = 4
 
     def __init__(
@@ -98,7 +98,7 @@ class NTRIPClient:
         # Public reconnect info
         self.reconnect_attempt_max = self.DEFAULT_RECONNECT_ATTEMPT_MAX
         self.reconnect_attempt_wait_seconds = \
-            self.DEFAULT_RECONNECT_ATEMPT_WAIT_SECONDS
+            self.DEFAULT_RECONNECT_ATTEMPT_WAIT_SECONDS
         self.rtcm_timeout_seconds = self.DEFAULT_RTCM_TIMEOUT_SECONDS
 
     def connect(self):

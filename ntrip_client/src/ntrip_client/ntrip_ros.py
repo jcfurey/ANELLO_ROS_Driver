@@ -40,7 +40,7 @@ class NTRIPRos(Node):
                 ('rtcm_frame_id', 'odom'),
                 ('reconnect_attempt_max', NTRIPClient.DEFAULT_RECONNECT_ATTEMPT_MAX),
                 ('reconnect_attempt_wait_seconds',
-                 NTRIPClient.DEFAULT_RECONNECT_ATEMPT_WAIT_SECONDS),
+                 NTRIPClient.DEFAULT_RECONNECT_ATTEMPT_WAIT_SECONDS),
                 ('rtcm_timeout_seconds', NTRIPClient.DEFAULT_RTCM_TIMEOUT_SECONDS),
             ]
         )
