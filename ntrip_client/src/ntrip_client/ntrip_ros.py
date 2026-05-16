@@ -54,8 +54,7 @@ class NTRIPRos(Node):
             ntrip_version = None
 
         if self._debug:
-            rclpy.logging.set_logger_level(
-                self.get_logger().name, rclpy.logging.LoggingSeverity.DEBUG)
+            self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
 
         username = None
         password = None
