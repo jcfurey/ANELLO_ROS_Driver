@@ -37,8 +37,8 @@
 #include "mavros_msgs/msg/rtcm.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 
-#include "tf2/LinearMath/Quaternion.h"
-#include "tf2_ros/transform_broadcaster.h"
+#include "tf2/LinearMath/Quaternion.hpp"
+#include "tf2_ros/transform_broadcaster.hpp"
 #include "diagnostic_updater/diagnostic_updater.hpp"
 
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
