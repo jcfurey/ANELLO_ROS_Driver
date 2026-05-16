@@ -46,7 +46,8 @@ void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time, const std::strin
     double gps_seconds = gps[1] * 1e-9;
     // GPS-UTC offset: 18 leap seconds as of 2017
     time_t utc_time_s = static_cast<time_t>(gps_seconds - 18.0);
-    struct tm *utc_info = std::gmtime(&utc_time_s);
+    struct tm utc_info_buf;
+    struct tm *utc_info = gmtime_r(&utc_time_s, &utc_info_buf);
 
     int utc_hours = utc_info->tm_hour;
     int utc_minutes = utc_info->tm_min;
