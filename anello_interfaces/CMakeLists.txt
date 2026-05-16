@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.14)
 project(anello_interfaces)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -19,8 +19,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/APHEALTH.msg"
   "msg/APCOV.msg"
   "srv/CmdAndRsp.srv"
-  "srv/initHeading.srv"
-  "srv/updHeading.srv"
+  "srv/InitHeading.srv"
+  "srv/UpdHeading.srv"
   DEPENDENCIES std_msgs
 )
 

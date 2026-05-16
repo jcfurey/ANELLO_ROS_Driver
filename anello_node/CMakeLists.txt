@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.14)
 project(anello_ros_driver)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -16,10 +16,9 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nmea_msgs REQUIRED)
-find_package(mavros_msgs REQUIRED)
+find_package(rtcm_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
 find_package(diagnostic_updater REQUIRED)
 
 set(DRIVER_SOURCES
@@ -36,24 +35,21 @@ set(DRIVER_SOURCES
   src/anello_ros_driver/messaging/rtcm_decoder.cpp
 )
 
-set(DRIVER_DEPS
-  rclcpp
-  rclcpp_components
-  anello_interfaces
-  sensor_msgs
-  nav_msgs
-  geometry_msgs
-  nmea_msgs
-  mavros_msgs
-  tf2
-  tf2_ros
-  tf2_geometry_msgs
-  diagnostic_updater
-)
-
 # Shared library for component loading
 add_library(anello_ros_driver_component SHARED ${DRIVER_SOURCES})
-ament_target_dependencies(anello_ros_driver_component ${DRIVER_DEPS})
+target_link_libraries(anello_ros_driver_component PUBLIC
+  rclcpp::rclcpp
+  rclcpp_components::component
+  ${anello_interfaces_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${nmea_msgs_TARGETS}
+  ${rtcm_msgs_TARGETS}
+  tf2::tf2
+  tf2_ros::tf2_ros
+  diagnostic_updater::diagnostic_updater
+)
 rclcpp_components_register_node(anello_ros_driver_component
   PLUGIN "anello::AnelloRosDriver"
   EXECUTABLE anello_ros_driver_node

@@ -34,11 +34,11 @@
 #include "sensor_msgs/msg/nav_sat_fix.hpp"
 #include "sensor_msgs/msg/nav_sat_status.hpp"
 #include "nmea_msgs/msg/sentence.hpp"
-#include "mavros_msgs/msg/rtcm.hpp"
+#include "rtcm_msgs/msg/message.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 
-#include "tf2/LinearMath/Quaternion.h"
-#include "tf2_ros/transform_broadcaster.h"
+#include "tf2/LinearMath/Quaternion.hpp"
+#include "tf2_ros/transform_broadcaster.hpp"
 #include "diagnostic_updater/diagnostic_updater.hpp"
 
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
@@ -218,13 +218,13 @@ private:
     // ── Subscribers ────────────────────────────────────────────────────
     void setup_subscribers()
     {
-        sub_rtcm_ = create_subscription<mavros_msgs::msg::RTCM>(
+        sub_rtcm_ = create_subscription<rtcm_msgs::msg::Message>(
             "ntrip_client/rtcm", 10,
-            [this](const mavros_msgs::msg::RTCM::SharedPtr msg) {
+            [this](const rtcm_msgs::msg::Message::SharedPtr msg) {
                 if (data_port_)
                     data_port_->write_data(
-                        reinterpret_cast<const char *>(msg->data.data()),
-                        msg->data.size());
+                        reinterpret_cast<const char *>(msg->message.data()),
+                        msg->message.size());
             });
 
         sub_odo_ = create_subscription<anello_interfaces::msg::APODO>(
@@ -648,7 +648,7 @@ private:
     navfix_pub_t pub_navfix_;
 
     // Subscribers
-    rclcpp::Subscription<mavros_msgs::msg::RTCM>::SharedPtr sub_rtcm_;
+    rclcpp::Subscription<rtcm_msgs::msg::Message>::SharedPtr sub_rtcm_;
     rclcpp::Subscription<anello_interfaces::msg::APODO>::SharedPtr sub_odo_;
 
     // Service
