@@ -19,8 +19,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/APHEALTH.msg"
   "msg/APCOV.msg"
   "srv/CmdAndRsp.srv"
-  "srv/initHeading.srv"
-  "srv/updHeading.srv"
+  "srv/InitHeading.srv"
+  "srv/UpdHeading.srv"
   DEPENDENCIES std_msgs
 )
 
