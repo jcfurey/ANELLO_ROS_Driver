@@ -23,7 +23,7 @@
 #include "anello_interfaces/msg/apcov.hpp"
 #include "anello_interfaces/msg/apodo.hpp"
 #include "nmea_msgs/msg/sentence.hpp"
-#include "mavros_msgs/msg/rtcm.hpp"
+#include "rtcm_msgs/msg/message.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/nav_sat_fix.hpp"
 

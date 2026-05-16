@@ -29,7 +29,7 @@ This repository contains three ROS2 packages:
 ### Prerequisites
 
 - ROS2 (Humble or later recommended) - see the [ROS2 installation guide](https://docs.ros.org/en/rolling/Installation.html)
-- `mavros_msgs` and `nmea_msgs` packages
+- `rtcm_msgs` and `nmea_msgs` packages
 
 ### Build
 
@@ -187,7 +187,7 @@ The driver publishes to `/diagnostics` via `diagnostic_updater` with:
 | Topic | Type | Description |
 |-------|------|-------------|
 | `anello/odo` | `anello_interfaces/APODO` | Odometer speed input to the ANELLO device |
-| `ntrip_client/rtcm` | `mavros_msgs/RTCM` | RTCM correction data from NTRIP client |
+| `ntrip_client/rtcm` | `rtcm_msgs/Message` | RTCM correction data from NTRIP client |
 
 ### Services
 

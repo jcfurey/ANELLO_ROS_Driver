@@ -7,7 +7,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Header
-from mavros_msgs.msg import RTCM
+from rtcm_msgs.msg import Message as RTCM
 from nmea_msgs.msg import Sentence
 
 from ntrip_client.ntrip_client import NTRIPClient
@@ -139,7 +139,7 @@ class NTRIPRos(Node):
                     stamp=self.get_clock().now().to_msg(),
                     frame_id=self._rtcm_frame_id
                 ),
-                data=chunk
+                message=chunk
             )
             self._rtcm_pub.publish(rtcm_msg)
 

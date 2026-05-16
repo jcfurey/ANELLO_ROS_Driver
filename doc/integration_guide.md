@@ -490,8 +490,8 @@ can disable the built-in one and pipe RTCM data directly:
 ros2 launch anello_ros_driver anello_driver.launch.py baud_rate:=921600
 
 # In another terminal, publish RTCM data to the driver
-ros2 topic pub /ntrip_client/rtcm mavros_msgs/msg/RTCM \
-  "{header: {frame_id: 'odom'}, data: [...]}"
+ros2 topic pub /ntrip_client/rtcm rtcm_msgs/msg/Message \
+  "{header: {frame_id: 'odom'}, message: [...]}"
 ```
 
 ---

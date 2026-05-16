@@ -30,7 +30,6 @@
 #include "anello_interfaces/msg/apcov.hpp"
 
 #include <nmea_msgs/msg/sentence.hpp>
-#include <mavros_msgs/msg/rtcm.hpp>
 #include <std_msgs/msg/header.hpp>
 
 void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time, const std::string &frame_id)
