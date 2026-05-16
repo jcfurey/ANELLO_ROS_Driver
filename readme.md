@@ -28,8 +28,16 @@ This repository contains three ROS2 packages:
 
 ### Prerequisites
 
-- ROS2 (Humble or later recommended) - see the [ROS2 installation guide](https://docs.ros.org/en/rolling/Installation.html)
+- A supported ROS2 distro - see the [ROS2 installation guide](https://docs.ros.org/en/rolling/Installation.html)
 - `rtcm_msgs` and `nmea_msgs` packages
+
+#### Supported ROS2 distros
+
+| Distro          | Status                                     |
+|-----------------|--------------------------------------------|
+| Humble          | Supported                                  |
+| Jazzy           | Supported (Ubuntu 24.04 / Python 3.12)     |
+| Lyrical/Kilted  | Build-verified; hardware testing pending   |
 
 ### Build
 
