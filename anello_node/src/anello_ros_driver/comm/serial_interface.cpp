@@ -68,6 +68,7 @@ void serial_interface::init(std::string portname, uint32_t baud_rate)
     options.c_cflag &= ~CSIZE;
     options.c_cflag |= CS8;
     options.c_cflag &= ~CRTSCTS;
+    options.c_cflag |= CLOCAL | CREAD;
     options.c_iflag = 0;
     options.c_lflag = 0;
     options.c_oflag = 0;
@@ -98,7 +99,7 @@ void serial_interface::init(std::string portname, uint32_t baud_rate)
     for (int i = 0; i < SER_PORT_FLUSH_COUNT; i++)
     {
         usleep(1000);
-        ioctl(this->usb_fd, TCFLSH, 2);
+        tcflush(this->usb_fd, TCIOFLUSH);
     }
 
     this->port_enabled = true;

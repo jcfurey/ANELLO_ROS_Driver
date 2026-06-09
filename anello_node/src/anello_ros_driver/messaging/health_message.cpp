@@ -1,5 +1,5 @@
 /********************************************************************************
- * File Name:   health_message.h
+ * File Name:   health_message.cpp
  * Description: Definition of the health_message class
  *
  * Author:      Austin Johnson

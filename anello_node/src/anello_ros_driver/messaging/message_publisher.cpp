@@ -95,9 +95,11 @@ void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time, const std::strin
     else
         gngga_message << "0,";
 
+    // Fixed precision keeps the sentence under the 82-char NMEA limit
+    // that the NTRIP client's parser enforces.
     gngga_message << static_cast<int>(gps[12]) << ",";
-    gngga_message << std::setw(4) << std::setfill('0') << gps[10] << ",";
-    gngga_message << gps[5] << ",M,";
+    gngga_message << std::fixed << std::setprecision(2) << gps[10] << ",";
+    gngga_message << std::setprecision(1) << gps[5] << ",M,";
     gngga_message << ",M,";
     gngga_message << ",";
     gngga_message << "";

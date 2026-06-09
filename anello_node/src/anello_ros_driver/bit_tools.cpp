@@ -15,10 +15,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <iostream>
-#include <iomanip>
-#include <sstream>
-#include <algorithm>
 
 #include <math.h>
 
@@ -114,49 +110,32 @@ extern int getbits(const unsigned char *buff, int pos, int len)
  */
 extern int checksum(unsigned char *buff, int len)
 {
-    unsigned char ck_sum = 0, cka, ckb;
+    unsigned char ck_sum = 0;
     int i;
-    std::stringstream ck;
-    std::string hexstring;
+    char hex[3];
 
     for (i = 1; i < len - 4; i++)
     {
         ck_sum ^= buff[i];
     }
-    // Convert number to hex string with width 2
-    ck << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(ck_sum);
-    hexstring = ck.str();
+    snprintf(hex, sizeof(hex), "%02X", ck_sum);
 
-    // string stream creates lower case values
-    // convert those letters to upper case to match with anello messaging protocols
-    cka = std::toupper(hexstring[0]);
-    ckb = std::toupper(hexstring[1]);
-
-    return (cka == buff[len - 3]) && (ckb == buff[len - 2]);
+    return (hex[0] == buff[len - 3]) && (hex[1] == buff[len - 2]);
 }
 
 extern std::string compute_checksum(const char *buff, int len)
 {
     unsigned char ck_sum = 0;
     int i;
-    
-    std::stringstream ck;
-    std::string ck_final;
-    
-    
+    char hex[3];
+
     for (i = 0; i < len; i++)
     {
         ck_sum ^= buff[i];
     }
+    snprintf(hex, sizeof(hex), "%02X", ck_sum);
 
-    //ensure two digits and add 0
-    ck << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(ck_sum);
-    ck_final = ck.str();
-
-    //make uppercase
-    std::transform(ck_final.begin(), ck_final.end(), ck_final.begin(), ::toupper);
-
-    return ck_final;
+    return std::string(hex);
 }
 
 /*
