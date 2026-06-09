@@ -228,6 +228,20 @@ private:
             RCLCPP_FATAL(get_logger(), "Data port init failed: %s", e.what());
             throw;
         }
+
+        // Over ethernet the unit accepts odometer input only on its
+        // dedicated channel (remote port 3); serial APODO goes to the
+        // config port instead.
+        if (config_.type == ETH) {
+            try {
+                odo_eth_port_ = std::make_unique<ethernet_interface>(
+                    config_.remote_ip, 3, config_.local_odometer_port);
+                odo_eth_port_->init();
+            } catch (const std::exception &e) {
+                RCLCPP_ERROR(get_logger(), "Odometer port init failed: %s", e.what());
+                odo_eth_port_.reset();
+            }
+        }
     }
 
     // ── Publishers ─────────────────────────────────────────────────────
@@ -266,13 +280,15 @@ private:
         sub_odo_ = create_subscription<anello_interfaces::msg::APODO>(
             "anello/odo", 1,
             [this](const anello_interfaces::msg::APODO::SharedPtr msg) {
-                if (!config_port_) return;
                 std::ostringstream body;
                 body << "APODO," << std::fixed << std::setprecision(2) << msg->odo_speed;
                 std::string body_str = body.str();
                 std::string ck = compute_checksum(body_str.c_str(), body_str.length());
                 std::string full = "#" + body_str + "*" + ck + "\r\n";
-                config_port_->write_data(full.c_str(), full.length());
+                if (config_.type == ETH && odo_eth_port_)
+                    odo_eth_port_->write_data(full.c_str(), full.length());
+                else if (config_port_)
+                    config_port_->write_data(full.c_str(), full.length());
             });
     }
 
@@ -673,9 +689,15 @@ private:
         nav.header.stamp = stamp;
         nav.header.frame_id = frame_gnss_;
 
-        nav.status.status = (ins[2] >= 1.0)
-            ? sensor_msgs::msg::NavSatStatus::STATUS_FIX
-            : sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+        // APINS status: 0/8 = attitude only (8-10 are GPS-disabled variants),
+        // 1/2/9/10 = position valid, 3/4 = RTK float/fix.
+        const int ins_status = static_cast<int>(ins[2]);
+        if (ins_status == 3 || ins_status == 4)
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX;
+        else if (ins_status == 0 || ins_status == 8)
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+        else
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
         nav.status.service =
             sensor_msgs::msg::NavSatStatus::SERVICE_GPS |
             sensor_msgs::msg::NavSatStatus::SERVICE_GLONASS |
@@ -709,6 +731,7 @@ private:
 
     std::unique_ptr<anello_config_port> config_port_;
     std::unique_ptr<anello_data_port> data_port_;
+    std::unique_ptr<ethernet_interface> odo_eth_port_;
 
     // Publishers
     imu_pub_t pub_imu_;

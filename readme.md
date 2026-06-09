@@ -108,7 +108,7 @@ All parameters can be set via the launch file or on the command line.
 | `com_type` | `UART` | Communication type: `UART` or `ETH` |
 | `uart_data_port` | `AUTO` | UART data port path, or `AUTO` for auto-detection |
 | `uart_config_port` | `AUTO` | UART config port path, `AUTO`, or `OFF` to disable |
-| `baud_rate` | `230400` | Serial baud rate (`115200`, `230400`, `460800`, `921600`) |
+| `baud_rate` | `230400` | Serial baud rate (`115200`, `230400`, `460800`, `921600`). The EVK ships at `921600`; the Ground INS/IMU default is `230400` — see [doc/anello_evk_reference.md](doc/anello_evk_reference.md) |
 | `remote_ip` | `192.168.1.111` | Device IP address (ethernet mode) |
 | `local_data_port` | `1111` | Local UDP data port (ethernet mode) |
 | `local_config_port` | `2222` | Local UDP config port (ethernet mode) |
