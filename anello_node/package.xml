@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>anello_ros_driver</name>
-  <version>3.0.0</version>
+  <version>3.1.0</version>
   <description>ROS2 driver for ANELLO Photonics GNSS/INS devices</description>
   <maintainer email="austin.johnson@anellophotonics.com">Austin Johnson</maintainer>
   <license>MIT</license>

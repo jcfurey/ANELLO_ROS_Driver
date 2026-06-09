@@ -126,7 +126,7 @@ public:
         setup_diagnostics();
         setup_timers();
 
-        RCLCPP_INFO(get_logger(), "ANELLO ROS2 driver initialized (v3.0.0)");
+        RCLCPP_INFO(get_logger(), "ANELLO ROS2 driver initialized (v3.1.0)");
     }
 
     ~AnelloRosDriver() override = default;

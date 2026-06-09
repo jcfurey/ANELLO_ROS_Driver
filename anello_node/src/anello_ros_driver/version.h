@@ -6,7 +6,7 @@
 #endif
 
 #ifndef MINOR_VERSION
-#define MINOR_VERSION 0
+#define MINOR_VERSION 1
 #endif
 
 #ifndef PATCH_VERSION
@@ -14,6 +14,20 @@
 #endif
 
 /*
+v3.1.0 : Audit fixes, hardening, and EVK alignment
+            1. Fix RTCM QoS mismatch (corrections now reach the device)
+            2. Memory-safety fixes in the ASCII/RTCM parser and sockets
+            3. Convert standard interfaces to REP-103 ENU/FLU; anello/*
+               topics stay device-native (NED/FRD)
+            4. NavSatFix status from the full APINS status enumeration
+            5. Drain data port per tick; non-blocking ethernet reads
+            6. Route APODO to the dedicated odometer channel over ethernet
+            7. heading_baseline parameter enables the HDG health check
+            8. Rewrite the NTRIP RTCM frame parser (no duplicate frames)
+            9. Source-filter inbound UDP; reject invalid remote IPs
+            10. EVK reference doc aligned to the ANELLO manual
+            11. colcon test green; warning-free build
+
 v3.0.0 : Major ROS2 standards upgrade
             1. Composable node (rclcpp_components)
             2. Standard sensor_msgs/Imu and NavSatFix publishing
