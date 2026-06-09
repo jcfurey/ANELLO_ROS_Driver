@@ -5,7 +5,11 @@ __pycache__
 
 .*.sw*
 .vscode/
+
+# colcon / ament build artifacts
 build/
+install/
+log/
 */launch/internal_*
 
 TODO.txt
