@@ -55,99 +55,77 @@ class RTCMParser:
         self._loginfo = loginfo
         self._logdebug = logdebug
 
-        # Empty buffer, will be filled out
-        self._caching_data = False
+        # Unparsed remainder carried between calls
         self._buffer = b''
 
     def parse(self, buffer):
-        # Add any data that we have cached
-        if self._caching_data:
-            combined_buffer = self._buffer + buffer
-        else:
-            combined_buffer = buffer
+        # Prepend any bytes left over from the previous call. self._buffer
+        # is the single source of truth for unparsed data; we never mix
+        # offsets between it and the incoming chunk.
+        data = self._buffer + buffer
 
-        # Loop over the passed buffer, and parse all available RTCM packets
-        index = 0
         rtcm_packets = []
-        while index < len(combined_buffer):
-            # Find the start of the RTCM 3.2 packet
-            if combined_buffer[index] == _RTCM_3_2_PREAMBLE:
-                # Make sure we have enough data to find the length
-                if len(combined_buffer) <= index + 2:
-                    self._logdebug(
-                        'Found beginning of RTCM packet at {}, but there'
-                        ' is not enough data in the buffer to find the'
-                        ' message length'.format(index)
-                    )
-                    self._caching_data = True
-                    buffer = buffer[index:]
-                    break
+        index = 0
+        consumed = 0  # bytes confirmed not to be the start of a pending frame
+        while index < len(data):
+            if data[index] != _RTCM_3_2_PREAMBLE:
+                index += 1
+                consumed = index
+                continue
 
-                # Make sure we have enough data in the packet to validate it
-                message_length = (
-                    (combined_buffer[index + 1] << 8
-                     | combined_buffer[index + 2]) & 0x03FF
-                )
-                if index + message_length + 6 <= len(combined_buffer):
-                    # Grab the packet from the buffer, and verify that it is valid
-                    # by comparing checksums
-                    packet = combined_buffer[index:index + message_length + 6]
-                    expected_checksum = (
-                        packet[-3] << 16 | packet[-2] << 8 | packet[-1]
-                    )
-                    actual_checksum = self._checksum(packet[:-3])
-                    if expected_checksum == actual_checksum:
-                        self._logdebug(
-                            'Found valid packet at {} with length {}'.format(
-                                index, message_length
-                            )
-                        )
-                        rtcm_packets.append(packet)
-                        index += message_length + 6
+            # Need 3 bytes (preamble + 10-bit length) to know the frame size
+            if index + 3 > len(data):
+                break
 
-                        # Remove the packet we just found from the cached buffer
-                        self._caching_data = False
-                        self._buffer = self._buffer[message_length + 5:]
-                        continue
-                    else:
-                        self._logwarn(
-                            'Found packet, but checksums didn\'t match'
-                        )
-                        self._logwarn(
-                            'Expected Checksum: 0x{:X}'.format(
-                                expected_checksum
-                            )
-                        )
-                        self._logwarn(
-                            'Actual Checksum:   0x{:X}'.format(
-                                actual_checksum
-                            )
-                        )
-                else:
-                    self._logdebug(
-                        'Found beginning of RTCM packet at {}, but there'
-                        ' is not enough data in the buffer to extract'
-                        ' it, caching'.format(index)
-                    )
-                    self._caching_data = True
+            # In a real RTCM 3.x frame the 6 bits after the preamble are
+            # reserved and zero. If they are not, this is a false preamble
+            # in the data stream; skip it rather than trusting its length.
+            if data[index + 1] & 0xFC:
+                index += 1
+                consumed = index
+                continue
 
-            # If we didn't find a message, manually move on to the next byte
-            index += 1
+            message_length = (
+                (data[index + 1] << 8 | data[index + 2]) & 0x03FF
+            )
+            frame_length = message_length + 6  # 3 header + payload + 3 CRC
 
-        # If we didn't find a full packet, cache this one for next time
-        if self._caching_data:
-            self._buffer += buffer
+            # Wait for the full frame (preamble..CRC) to arrive
+            if index + frame_length > len(data):
+                break
 
-            # Throw away old data if we are at our limit
-            if len(self._buffer) > _MAX_BUFFER_SIZE:
+            packet = data[index:index + frame_length]
+            expected_checksum = packet[-3] << 16 | packet[-2] << 8 | packet[-1]
+            actual_checksum = self._checksum(packet[:-3])
+            if expected_checksum == actual_checksum:
+                self._logdebug(
+                    'Found valid packet at {} with length {}'.format(
+                        index, message_length))
+                rtcm_packets.append(packet)
+                index += frame_length
+                consumed = index
+            else:
+                # Not a real frame here (or corrupt); skip this preamble byte
+                # and resync on the next one.
+                self._logwarn("Found packet, but checksums didn't match")
                 self._logwarn(
-                    "Too much data buffered, trimming to {} bytes.".format(
-                        _MAX_BUFFER_SIZE
-                    )
-                )
-                self._buffer = self._buffer[:_MAX_BUFFER_SIZE]
+                    'Expected Checksum: 0x{:X}'.format(expected_checksum))
+                self._logwarn(
+                    'Actual Checksum:   0x{:X}'.format(actual_checksum))
+                index += 1
+                consumed = index
 
-        # Return the RTCM packets we found
+        # Keep only the unconsumed tail for next time
+        self._buffer = data[consumed:]
+
+        # Throw away the oldest data if the remainder grows without bound
+        # (e.g. a stream of preambles that never completes a valid frame)
+        if len(self._buffer) > _MAX_BUFFER_SIZE:
+            self._logwarn(
+                "Too much data buffered, trimming to {} bytes.".format(
+                    _MAX_BUFFER_SIZE))
+            self._buffer = self._buffer[-_MAX_BUFFER_SIZE:]
+
         return rtcm_packets
 
     def _checksum(self, packet):

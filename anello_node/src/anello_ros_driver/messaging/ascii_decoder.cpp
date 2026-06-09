@@ -101,6 +101,7 @@ int decode_ascii_im1(char *val[], int field_num, double *output_val)
     /*
     #APIMU,318214.937,0.0344,-0.0128,1.0077,-0.0817,0.0013,-0.0038,0.01051,47.0547*55
     */
+    (void)field_num;
     int loc = 2;
     
     output_val[0] = atof(val[1]);
@@ -140,7 +141,7 @@ int decode_ascii_ins(char *val[], double *output_val)
     output_val[11] = atof(val[12]);         /* heading (deg) */
 
     output_val[12] = atoi(val[13]);         /* zupt */
-    output_val[13] = atoi(val[2]) * 1.0e-9; /* GPS Time s */
+    output_val[13] = atof(val[2]) * 1.0e-9; /* GPS Time s (ns value overflows int) */
 
     return 1;
 }

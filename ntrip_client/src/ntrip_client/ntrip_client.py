@@ -256,18 +256,17 @@ class NTRIPClient:
                     self._reconnect_attempt_count
                     >= self.reconnect_attempt_max
                 ):
+                    attempts = self._reconnect_attempt_count
                     self._reconnect_attempt_count = 0
                     raise Exception(
                         "Reconnect was attempted {} times, but "
-                        "never succeeded".format(
-                            self._reconnect_attempt_count))
-                    break
+                        "never succeeded".format(attempts))
                 elif connect_success:
                     self._reconnect_attempt_count = 0
                     break
         else:
             self._logdebug(
-                'Reconnect called while still connected, ignoring')
+                'Reconnect called while not connected, ignoring')
 
     def send_nmea(self, sentence):
         if not self._connected:
@@ -339,13 +338,19 @@ class NTRIPClient:
 
         # Since we only ever pass the server socket to the list of
         # read sockets, we can just read from that.
-        # Read all available data into a buffer
+        # Read all available data into a buffer. We re-check readability
+        # before every recv: a full-CHUNK read does not guarantee more data
+        # is waiting, and a blocking recv here would stall the caller for
+        # the full socket timeout (this runs inside the rclpy timer).
         data = b''
         while True:
             try:
                 chunk = self._server_socket.recv(_CHUNK_SIZE)
                 data += chunk
                 if len(chunk) < _CHUNK_SIZE:
+                    break
+                ready, _, _ = select.select([self._server_socket], [], [], 0)
+                if not ready:
                     break
             except Exception:
                 self._logerr(
@@ -384,8 +389,10 @@ class NTRIPClient:
             self._recv_rtcm_last_packet_timestamp = time.time()
             self._first_rtcm_received = True
 
-        # Send the data to the RTCM parser to parse it
-        return data if data else []
+        # Parse the byte stream into complete, checksum-verified RTCM
+        # frames so each published rtcm_msgs/Message holds exactly one
+        # RTCM message (partial frames are cached until the rest arrives)
+        return self._rtcm_parser.parse(data) if data else []
 
     def shutdown(self):
         # Set some state, and then disconnect
@@ -414,6 +421,10 @@ class NTRIPClient:
         return request_str.encode('utf-8')
 
     def _socket_is_open(self):
+        # SSL sockets do not support recv flags like MSG_PEEK, so we
+        # cannot probe without consuming data; assume the socket is open
+        if self.ssl:
+            return True
         try:
             # this will try to read bytes without blocking and also
             # without removing them from buffer (peek only)

@@ -16,6 +16,7 @@
 #include <cstring>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <stdexcept>
@@ -70,11 +71,13 @@ void ethernet_interface::init()
     this->cliaddr.sin_family = AF_INET;
     this->cliaddr.sin_port = htons(this->remote_port);
     this->cliaddr.sin_addr.s_addr = inet_addr(this->remote_ip_address.c_str());
-
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 100 * 1000; // 100 ms
-    setsockopt(this->sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+    if (this->cliaddr.sin_addr.s_addr == INADDR_NONE)
+    {
+        close(this->sockfd);
+        this->sockfd = -1;
+        throw std::runtime_error("Invalid remote IP address: " +
+                                 this->remote_ip_address);
+    }
 }
 
 void ethernet_interface::write_data(const char *buf, size_t buf_len)
@@ -86,14 +89,46 @@ void ethernet_interface::write_data(const char *buf, size_t buf_len)
 
 size_t ethernet_interface::get_data(char *buf, size_t buf_len)
 {
-    if (this->sockfd < 0) return 0;
-    socklen_t len = sizeof(this->cliaddr);
-    int n = recvfrom(this->sockfd, buf, buf_len, 0,
-                     (struct sockaddr *)&(this->cliaddr), &len);
+    if (this->sockfd < 0 || buf_len == 0) return 0;
+
+    // Receive into a separate source address: cliaddr stays fixed at the
+    // configured device endpoint so writes cannot be redirected by an
+    // arbitrary sender, and datagrams from other hosts are dropped.
+    struct sockaddr_in srcaddr;
+    socklen_t len = sizeof(srcaddr);
+    memset(&srcaddr, 0, sizeof(srcaddr));
+
+    // buf_len - 1 leaves room for the NUL terminator below.
+    int n = recvfrom(this->sockfd, buf, buf_len - 1, MSG_DONTWAIT,
+                     (struct sockaddr *)&srcaddr, &len);
     if (n < 0)
+    {
+        return 0;
+    }
+    if (srcaddr.sin_addr.s_addr != this->cliaddr.sin_addr.s_addr)
     {
         return 0;
     }
     buf[n] = '\0';
     return static_cast<size_t>(n);
+}
+
+size_t ethernet_interface::get_data(char *buf, size_t buf_len, int timeout_ms)
+{
+    if (this->sockfd < 0) return 0;
+
+    fd_set read_set;
+    FD_ZERO(&read_set);
+    FD_SET(this->sockfd, &read_set);
+
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    int ready = select(this->sockfd + 1, &read_set, nullptr, nullptr, &tv);
+    if (ready <= 0)
+    {
+        return 0;
+    }
+    return this->get_data(buf, buf_len);
 }

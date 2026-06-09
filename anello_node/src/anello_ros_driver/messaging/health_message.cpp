@@ -1,5 +1,5 @@
 /********************************************************************************
- * File Name:   health_message.h
+ * File Name:   health_message.cpp
  * Description: Definition of the health_message class
  *
  * Author:      Austin Johnson
@@ -234,9 +234,13 @@ void health_message::get_current_diff(double *gps_diff_out, double *hdg_diff_out
     return;
 }
 
-//TODO: Implement baseline check
 bool health_message::is_baseline_correct()
 {
+    // With no configured baseline the comparison would always fail and
+    // permanently disable the HDG-vs-INS heading check, so skip it.
+    if (this->configured_baseline <= 0.0)
+        return (std::fabs(this->wz_fog_moving_average) < 5);
+
     return (std::fabs(this->hdg_baseline - this->configured_baseline) < BASELINE_ACC_THRESHOLD) && (std::fabs(this->wz_fog_moving_average) < 5);
 }
 

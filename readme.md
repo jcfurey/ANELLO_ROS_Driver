@@ -108,7 +108,7 @@ All parameters can be set via the launch file or on the command line.
 | `com_type` | `UART` | Communication type: `UART` or `ETH` |
 | `uart_data_port` | `AUTO` | UART data port path, or `AUTO` for auto-detection |
 | `uart_config_port` | `AUTO` | UART config port path, `AUTO`, or `OFF` to disable |
-| `baud_rate` | `230400` | Serial baud rate (`115200`, `230400`, `460800`, `921600`) |
+| `baud_rate` | `230400` | Serial baud rate (`115200`, `230400`, `460800`, `921600`). The EVK ships at `921600`; the Ground INS/IMU default is `230400` — see [doc/anello_evk_reference.md](doc/anello_evk_reference.md) |
 | `remote_ip` | `192.168.1.111` | Device IP address (ethernet mode) |
 | `local_data_port` | `1111` | Local UDP data port (ethernet mode) |
 | `local_config_port` | `2222` | Local UDP config port (ethernet mode) |
@@ -135,6 +135,12 @@ All parameters can be set via the launch file or on the command line.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `poll_interval_ms` | `5` | Main loop polling interval in milliseconds |
+
+#### Health Monitoring
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `heading_baseline` | `0.0` | Dual-antenna baseline length in meters, used to validate APHDG heading in the health monitor (`0.0` = skip the baseline check) |
 
 ### NTRIP Client Parameters
 
@@ -175,6 +181,13 @@ All custom messages include a `std_msgs/Header` with timestamp and frame ID. Mes
 | `imu/data` | `sensor_msgs/Imu` | Standard IMU message with orientation quaternion, angular velocity, linear acceleration, and covariance |
 | `gps/fix` | `sensor_msgs/NavSatFix` | Standard GNSS fix with position covariance |
 | `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA sentence forwarded to NTRIP caster |
+
+**Frame conventions:** the `anello/*` custom topics carry values in the
+device-native convention (NED attitude with heading clockwise from north,
+FRD body axes), exactly as reported by the unit. The standard interfaces —
+`imu/data`, `gps/fix`, and the TF broadcast — are converted by the driver
+to REP-103 (ENU orientation, FLU body axes), so they can be consumed
+directly by tools like `robot_localization` and Nav2.
 
 #### TF Transforms
 

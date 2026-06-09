@@ -199,16 +199,20 @@ The `anello/ins` message includes an `ins_status` field:
 
 | Value | Meaning |
 |-------|---------|
-| 255 | Uninitialized |
 | 0 | Attitude only |
 | 1 | Position + Attitude |
 | 2 | Position + Heading + Attitude |
 | 3 | RTK Float |
 | 4 | RTK Fix |
+| 8 | Attitude only (GPS disabled) |
+| 9 | Position + Attitude (GPS disabled) |
+| 10 | Position + Heading + Attitude (GPS disabled) |
 
-You should see the status progress from 255 -> 0 -> 1 -> 2 as the device
+You should see the status progress from 0 -> 1 -> 2 as the device
 initializes. With NTRIP corrections, it will reach 3 (RTK Float) and
-eventually 4 (RTK Fix).
+eventually 4 (RTK Fix). Values 8-10 mirror 0-2 but indicate GPS aiding
+is disabled. The driver maps these to `sensor_msgs/NavSatStatus` on
+`gps/fix`: 0/8 -> NO_FIX, 3/4 -> GBAS_FIX (RTK), all others -> FIX.
 
 
 ---

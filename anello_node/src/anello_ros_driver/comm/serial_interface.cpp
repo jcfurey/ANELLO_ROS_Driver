@@ -68,6 +68,7 @@ void serial_interface::init(std::string portname, uint32_t baud_rate)
     options.c_cflag &= ~CSIZE;
     options.c_cflag |= CS8;
     options.c_cflag &= ~CRTSCTS;
+    options.c_cflag |= CLOCAL | CREAD;
     options.c_iflag = 0;
     options.c_lflag = 0;
     options.c_oflag = 0;
@@ -98,7 +99,7 @@ void serial_interface::init(std::string portname, uint32_t baud_rate)
     for (int i = 0; i < SER_PORT_FLUSH_COUNT; i++)
     {
         usleep(1000);
-        ioctl(this->usb_fd, TCFLSH, 2);
+        tcflush(this->usb_fd, TCIOFLUSH);
     }
 
     this->port_enabled = true;
@@ -106,12 +107,12 @@ void serial_interface::init(std::string portname, uint32_t baud_rate)
 
 size_t serial_interface::get_data(char *buf, size_t buf_len)
 {
-    if (!this->port_enabled || this->usb_fd < 0)
+    if (!this->port_enabled || this->usb_fd < 0 || buf_len == 0)
     {
         return 0;
     }
 
-    ssize_t bytes_read = read(this->usb_fd, buf, (buf_len * sizeof(char)) - 1);
+    ssize_t bytes_read = read(this->usb_fd, buf, buf_len - 1);
     if (bytes_read < 0)
     {
         return 0;
@@ -131,9 +132,11 @@ size_t serial_interface::get_data(char *buf, size_t buf_len, int timeout)
     FD_ZERO(&readSet);
     FD_SET(this->usb_fd, &readSet);
 
+    // Split into sec/usec: a timeout >= 1000 ms would otherwise push
+    // tv_usec past 1e6, which select() rejects with EINVAL.
     struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = timeout * 1000;
+    tv.tv_sec = timeout / 1000;
+    tv.tv_usec = (timeout % 1000) * 1000;
 
     int ready = select(this->usb_fd + 1, &readSet, nullptr, nullptr, &tv);
     if (ready <= 0)
