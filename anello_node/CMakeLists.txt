@@ -12,8 +12,8 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(anello_interfaces REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nmea_msgs REQUIRED)
 find_package(rtcm_msgs REQUIRED)
@@ -40,8 +40,8 @@ target_link_libraries(anello_ros_driver_component PUBLIC
   rclcpp::rclcpp
   rclcpp_components::component
   ${anello_interfaces_TARGETS}
+  ${std_msgs_TARGETS}
   ${sensor_msgs_TARGETS}
-  ${nav_msgs_TARGETS}
   ${geometry_msgs_TARGETS}
   ${nmea_msgs_TARGETS}
   ${rtcm_msgs_TARGETS}

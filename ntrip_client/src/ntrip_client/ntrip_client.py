@@ -338,13 +338,19 @@ class NTRIPClient:
 
         # Since we only ever pass the server socket to the list of
         # read sockets, we can just read from that.
-        # Read all available data into a buffer
+        # Read all available data into a buffer. We re-check readability
+        # before every recv: a full-CHUNK read does not guarantee more data
+        # is waiting, and a blocking recv here would stall the caller for
+        # the full socket timeout (this runs inside the rclpy timer).
         data = b''
         while True:
             try:
                 chunk = self._server_socket.recv(_CHUNK_SIZE)
                 data += chunk
                 if len(chunk) < _CHUNK_SIZE:
+                    break
+                ready, _, _ = select.select([self._server_socket], [], [], 0)
+                if not ready:
                     break
             except Exception:
                 self._logerr(

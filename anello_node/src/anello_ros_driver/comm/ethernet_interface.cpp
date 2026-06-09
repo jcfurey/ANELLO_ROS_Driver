@@ -71,6 +71,13 @@ void ethernet_interface::init()
     this->cliaddr.sin_family = AF_INET;
     this->cliaddr.sin_port = htons(this->remote_port);
     this->cliaddr.sin_addr.s_addr = inet_addr(this->remote_ip_address.c_str());
+    if (this->cliaddr.sin_addr.s_addr == INADDR_NONE)
+    {
+        close(this->sockfd);
+        this->sockfd = -1;
+        throw std::runtime_error("Invalid remote IP address: " +
+                                 this->remote_ip_address);
+    }
 }
 
 void ethernet_interface::write_data(const char *buf, size_t buf_len)
@@ -82,7 +89,7 @@ void ethernet_interface::write_data(const char *buf, size_t buf_len)
 
 size_t ethernet_interface::get_data(char *buf, size_t buf_len)
 {
-    if (this->sockfd < 0) return 0;
+    if (this->sockfd < 0 || buf_len == 0) return 0;
 
     // Receive into a separate source address: cliaddr stays fixed at the
     // configured device endpoint so writes cannot be redirected by an
