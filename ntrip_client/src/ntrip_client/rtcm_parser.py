@@ -145,7 +145,7 @@ class RTCMParser:
                         _MAX_BUFFER_SIZE
                     )
                 )
-                self._buffer = self._buffer[:_MAX_BUFFER_SIZE]
+                self._buffer = self._buffer[-_MAX_BUFFER_SIZE:]
 
         # Return the RTCM packets we found
         return rtcm_packets

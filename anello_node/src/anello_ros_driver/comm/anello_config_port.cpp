@@ -151,6 +151,14 @@ size_t anello_config_port::get_data(char *buf, size_t buf_len)
         return this->get_data_uart(buf, buf_len);
 }
 
+size_t anello_config_port::get_data(char *buf, size_t buf_len, int timeout_ms)
+{
+    if (this->config.type == ETH)
+        return this->ethernet_port.get_data(buf, buf_len, timeout_ms);
+    else
+        return this->uart_port.get_data(buf, buf_len, timeout_ms);
+}
+
 size_t anello_config_port::get_data_uart(char *buf, size_t buf_len)
 {
     return this->uart_port.get_data(buf, buf_len);
@@ -190,7 +198,10 @@ double anello_config_port::get_baseline()
     this->get_data(buf, 100);
 
     int num_fields = parse_fields(buf, field_array);
-    (void)num_fields;
+    if (num_fields < 3)
+    {
+        return 0.0;
+    }
 
     if ((strstr(field_array[0], "APVEH") == nullptr) ||
         (strstr(field_array[1], "bsl") == nullptr))

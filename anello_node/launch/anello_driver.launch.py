@@ -2,7 +2,8 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -46,6 +47,11 @@ def generate_launch_description():
         DeclareLaunchArgument('poll_interval_ms', default_value='5',
                               description='Main loop poll interval (ms)'),
 
+        # ── Health monitoring ──
+        DeclareLaunchArgument('heading_baseline', default_value='0.0',
+                              description='Dual-antenna baseline length (m) for '
+                                          'heading health validation, 0.0 = skip'),
+
         # ── NTRIP parameters ──
         DeclareLaunchArgument('ntrip_host', default_value='',
                               description='NTRIP caster host'),
@@ -82,15 +88,18 @@ def generate_launch_description():
                 'publish_tf': LaunchConfiguration('publish_tf'),
                 'tf_parent_frame': LaunchConfiguration('tf_parent_frame'),
                 'poll_interval_ms': LaunchConfiguration('poll_interval_ms'),
+                'heading_baseline': LaunchConfiguration('heading_baseline'),
             }],
         ),
 
-        # ── NTRIP client node ──
+        # ── NTRIP client node (only when a caster host is configured) ──
         Node(
             package='ntrip_client',
             executable='ntrip_ros',
             name='ntrip_client',
             output='screen',
+            condition=IfCondition(PythonExpression(
+                ["'", LaunchConfiguration('ntrip_host'), "' != ''"])),
             parameters=[{
                 'host': LaunchConfiguration('ntrip_host'),
                 'port': LaunchConfiguration('ntrip_port'),

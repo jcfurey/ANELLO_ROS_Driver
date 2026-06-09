@@ -18,10 +18,10 @@
 #include "rtcm_decoder.h"
 #include "message_publisher.h"
 
-void decode_rtcm_imu_msg(double imu[], a1buff_t a1buff)
+void decode_rtcm_imu_msg(double imu[], const a1buff_t &a1buff)
 {
-    rtcm_apimu_t rtcm_apimu = {0};
-    rtcm_old_apimu_t rtcm_old_apimu = {0};
+    rtcm_apimu_t rtcm_apimu = {};
+    rtcm_old_apimu_t rtcm_old_apimu = {};
 
     if (a1buff.nlen >= 61)
     {
@@ -56,9 +56,9 @@ void decode_rtcm_imu_msg(double imu[], a1buff_t a1buff)
     }
 }
 
-void decode_rtcm_im1_msg(double im1[], a1buff_t a1buff)
+void decode_rtcm_im1_msg(double im1[], const a1buff_t &a1buff)
 {
-    rtcm_apim1_t rtcm_apim1 = {0};
+    rtcm_apim1_t rtcm_apim1 = {};
 
     memcpy(reinterpret_cast<uint8_t *>(&rtcm_apim1), a1buff.buf + 5, sizeof(rtcm_apim1_t));
     im1[0] = rtcm_apim1.MCU_Time * 1e-6;
@@ -73,9 +73,9 @@ void decode_rtcm_im1_msg(double im1[], a1buff_t a1buff)
     im1[9] = rtcm_apim1.Sync_Time * 1.0e-6;       /* T_Sync ms*/
 }
 
-void decode_rtcm_ins_msg(double ins[], a1buff_t a1buff)
+void decode_rtcm_ins_msg(double ins[], const a1buff_t &a1buff)
 {
-    rtcm_apins_t rtcm_apins = {0};
+    rtcm_apins_t rtcm_apins = {};
 
     memcpy(reinterpret_cast<uint8_t *>(&rtcm_apins), a1buff.buf + 5, sizeof(rtcm_apins_t));
 
@@ -97,9 +97,9 @@ void decode_rtcm_ins_msg(double ins[], a1buff_t a1buff)
     ins[12] = rtcm_apins.ZUPT;                 /* zupt */
 }
 
-int decode_rtcm_gps_msg(double gps[], a1buff_t a1buff)
+int decode_rtcm_gps_msg(double gps[], const a1buff_t &a1buff)
 {
-    rtcm_apgps_t rtcm_apgps = {0};
+    rtcm_apgps_t rtcm_apgps = {};
 
     memcpy(reinterpret_cast<uint8_t *>(&rtcm_apgps), a1buff.buf + 5, sizeof(rtcm_apgps_t));
     gps[0] = rtcm_apgps.Time * 1e-6;           /* time MCU */
@@ -130,9 +130,9 @@ int decode_rtcm_gps_msg(double gps[], a1buff_t a1buff)
     }
 }
 
-void decode_rtcm_hdg_msg(double hdr[], a1buff_t a1buff)
+void decode_rtcm_hdg_msg(double hdr[], const a1buff_t &a1buff)
 {
-    rtcm_aphdr_t rtcm_aphdr = {0};
+    rtcm_aphdr_t rtcm_aphdr = {};
 
     memcpy(reinterpret_cast<uint8_t *>(&rtcm_aphdr), a1buff.buf + 5, sizeof(rtcm_aphdr_t));
     hdr[0] = rtcm_aphdr.MCU_Time * 1e-6; /* time MCU */
@@ -149,9 +149,9 @@ void decode_rtcm_hdg_msg(double hdr[], a1buff_t a1buff)
     hdr[9] = rtcm_aphdr.statusFlags;                     /* flag */
 }
 
-void decode_rtcm_cov_msg(double cov[], a1buff_t a1buff)
+void decode_rtcm_cov_msg(double cov[], const a1buff_t &a1buff)
 {
-    rtcm_apcov_t rtcm_apcov = {0};
+    rtcm_apcov_t rtcm_apcov = {};
 
     memcpy(reinterpret_cast<uint8_t *>(&rtcm_apcov), a1buff.buf + 5, sizeof(rtcm_apcov_t));
     cov[0] = rtcm_apcov.Time * 1e-6; /* time MCU */

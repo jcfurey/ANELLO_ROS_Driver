@@ -136,6 +136,12 @@ All parameters can be set via the launch file or on the command line.
 |-----------|---------|-------------|
 | `poll_interval_ms` | `5` | Main loop polling interval in milliseconds |
 
+#### Health Monitoring
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `heading_baseline` | `0.0` | Dual-antenna baseline length in meters, used to validate APHDG heading in the health monitor (`0.0` = skip the baseline check) |
+
 ### NTRIP Client Parameters
 
 | Parameter | Default | Description |
@@ -175,6 +181,13 @@ All custom messages include a `std_msgs/Header` with timestamp and frame ID. Mes
 | `imu/data` | `sensor_msgs/Imu` | Standard IMU message with orientation quaternion, angular velocity, linear acceleration, and covariance |
 | `gps/fix` | `sensor_msgs/NavSatFix` | Standard GNSS fix with position covariance |
 | `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA sentence forwarded to NTRIP caster |
+
+**Frame conventions:** the `anello/*` custom topics carry values in the
+device-native convention (NED attitude with heading clockwise from north,
+FRD body axes), exactly as reported by the unit. The standard interfaces —
+`imu/data`, `gps/fix`, and the TF broadcast — are converted by the driver
+to REP-103 (ENU orientation, FLU body axes), so they can be consumed
+directly by tools like `robot_localization` and Nav2.
 
 #### TF Transforms
 

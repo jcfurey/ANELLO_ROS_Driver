@@ -31,7 +31,6 @@ set(DRIVER_SOURCES
   src/anello_ros_driver/messaging/ascii_decoder.cpp
   src/anello_ros_driver/messaging/health_message.cpp
   src/anello_ros_driver/messaging/message_publisher.cpp
-  src/anello_ros_driver/messaging/ntrip_buffer.cpp
   src/anello_ros_driver/messaging/rtcm_decoder.cpp
 )
 

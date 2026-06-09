@@ -27,7 +27,7 @@ enum RECEIVER_ID
  * a1buff_t a1buff : buffer variable where the rtcm message is buffered and information about it is stored
  *
  */
-void decode_rtcm_imu_msg(double imu[], a1buff_t a1buff);
+void decode_rtcm_imu_msg(double imu[], const a1buff_t &a1buff);
 
 /*
  * Parameters:
@@ -35,7 +35,7 @@ void decode_rtcm_imu_msg(double imu[], a1buff_t a1buff);
  * a1buff_t a1buff : buffer variable where the rtcm message is buffered and information about it is stored
  *
  */
-void decode_rtcm_im1_msg(double im1[], a1buff_t a1buff);
+void decode_rtcm_im1_msg(double im1[], const a1buff_t &a1buff);
 
 /*
  * Parameters:
@@ -43,7 +43,7 @@ void decode_rtcm_im1_msg(double im1[], a1buff_t a1buff);
  * a1buff_t a1buff : buffer variable where the rtcm message is buffered and information about it is stored
  *
  */
-void decode_rtcm_ins_msg(double ins[], a1buff_t a1buff);
+void decode_rtcm_ins_msg(double ins[], const a1buff_t &a1buff);
 
 /*
  * Parameters:
@@ -54,7 +54,7 @@ void decode_rtcm_ins_msg(double ins[], a1buff_t a1buff);
  * 1 if antenna 1
  * 2 if antenna 2
  */
-int decode_rtcm_gps_msg(double gps[], a1buff_t a1buff);
+int decode_rtcm_gps_msg(double gps[], const a1buff_t &a1buff);
 
 /*
  * Parameters:
@@ -62,7 +62,7 @@ int decode_rtcm_gps_msg(double gps[], a1buff_t a1buff);
  * a1buff_t a1buff : buffer variable where the rtcm message is buffered and information about it is stored
  *
  */
-void decode_rtcm_hdg_msg(double hdg[], a1buff_t a1buff);
+void decode_rtcm_hdg_msg(double hdg[], const a1buff_t &a1buff);
 
 /*
  * Parameters:
@@ -70,6 +70,6 @@ void decode_rtcm_hdg_msg(double hdg[], a1buff_t a1buff);
  * a1buff_t a1buff : buffer variable where the rtcm message is buffered and information about it is stored
  *
  */
-void decode_rtcm_cov_msg(double cov[], a1buff_t a1buff);
+void decode_rtcm_cov_msg(double cov[], const a1buff_t &a1buff);
 
 #endif

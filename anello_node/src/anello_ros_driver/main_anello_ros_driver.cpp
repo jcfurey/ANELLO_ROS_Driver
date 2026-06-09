@@ -45,7 +45,6 @@
 #include "rclcpp_components/register_node_macro.hpp"
 
 #include "bit_tools.h"
-#include "messaging/ntrip_buffer.h"
 #include "messaging/rtcm_decoder.h"
 #include "messaging/ascii_decoder.h"
 #include "messaging/message_publisher.h"
@@ -55,6 +54,36 @@ static constexpr double kPi = 3.14159265358979323846;
 static constexpr double kGAccel = 9.80665;
 static constexpr double kDeg2Rad = kPi / 180.0;
 static constexpr double kDeg2RadSq = kDeg2Rad * kDeg2Rad;
+static constexpr double kHalfPi = kPi / 2.0;
+
+/* Frame conventions
+ *
+ * The device reports attitude in NED (heading clockwise from north) and
+ * body-frame vectors in FRD (x forward, y right, z down). The custom
+ * "anello/..." topics carry these values unchanged, in the device-native
+ * convention. Only the standard ROS interfaces (imu/data, gps/fix, TF)
+ * are converted here to REP-103 ENU / FLU.
+ *
+ * NED rpy -> ENU rpy:  roll' = roll, pitch' = -pitch, yaw' = pi/2 - heading
+ * FRD vec -> FLU vec:  x' = x, y' = -y, z' = -z
+ */
+static tf2::Quaternion ned_rpy_deg_to_enu_quat(double roll_deg, double pitch_deg,
+                                               double heading_deg)
+{
+    tf2::Quaternion q;
+    q.setRPY(roll_deg * kDeg2Rad,
+             -pitch_deg * kDeg2Rad,
+             kHalfPi - heading_deg * kDeg2Rad);
+    return q;
+}
+
+/* Sign pattern for rotating a (roll, pitch, yaw) covariance through the
+ * NED->ENU axis map D = diag(1, -1, -1): C' = D * C * D. */
+static constexpr double kEnuCovSign[9] = {
+     1.0, -1.0, -1.0,
+    -1.0,  1.0,  1.0,
+    -1.0,  1.0,  1.0,
+};
 
 static int input_a1_data(a1buff_t *a1, uint8_t data);
 
@@ -145,6 +174,10 @@ private:
 
         declare_parameter("poll_interval_ms", 5,
             d("Main loop polling interval in milliseconds"));
+
+        declare_parameter("heading_baseline", 0.0,
+            d("Dual-antenna baseline length in meters, used to validate the "
+              "APHDG heading in the health monitor (0.0 = skip the check)"));
     }
 
     void read_parameters()
@@ -170,6 +203,7 @@ private:
         publish_tf_ = get_parameter("publish_tf").as_bool();
         tf_parent_ = get_parameter("tf_parent_frame").as_string();
         poll_ms_ = get_parameter("poll_interval_ms").as_int();
+        health_msg_.set_baseline(get_parameter("heading_baseline").as_double());
 
         RCLCPP_INFO(get_logger(), "com_type=%s baud=%u poll=%ldms",
                      com_type.c_str(), config_.baud_rate, poll_ms_);
@@ -218,8 +252,10 @@ private:
     // ── Subscribers ────────────────────────────────────────────────────
     void setup_subscribers()
     {
+        // SensorDataQoS (best-effort) to match the NTRIP client's publisher;
+        // a reliable subscription would not connect to a best-effort publisher.
         sub_rtcm_ = create_subscription<rtcm_msgs::msg::Message>(
-            "ntrip_client/rtcm", 10,
+            "ntrip_client/rtcm", rclcpp::SensorDataQoS(),
             [this](const rtcm_msgs::msg::Message::SharedPtr msg) {
                 if (data_port_)
                     data_port_->write_data(
@@ -272,8 +308,11 @@ private:
         auto start = std::chrono::steady_clock::now();
         auto timeout = std::chrono::milliseconds(500);
 
+        // Bounded 20 ms reads instead of unbounded reads + usleep: the plain
+        // serial read can block for VTIME (0.5 s) per call, stalling the
+        // executor well past the 500 ms response budget.
         while (std::chrono::steady_clock::now() - start < timeout) {
-            int n = static_cast<int>(config_port_->get_data(read_buf, kMaxResp - 1));
+            int n = static_cast<int>(config_port_->get_data(read_buf, kMaxResp - 1, 20));
             if (n > 0) {
                 read_buf[n] = '\0';
                 response += read_buf;
@@ -281,7 +320,6 @@ private:
                     response.substr(response.size() - 2) == "\r\n")
                     break;
             }
-            usleep(2000);
         }
 
         if (response.empty()) {
@@ -314,8 +352,7 @@ private:
         t.transform.translation.y = 0.0;
         t.transform.translation.z = 0.0;
 
-        tf2::Quaternion q;
-        q.setRPY(roll_deg * kDeg2Rad, pitch_deg * kDeg2Rad, heading_deg * kDeg2Rad);
+        tf2::Quaternion q = ned_rpy_deg_to_enu_quat(roll_deg, pitch_deg, heading_deg);
         t.transform.rotation.x = q.x();
         t.transform.rotation.y = q.y();
         t.transform.rotation.z = q.z();
@@ -372,13 +409,27 @@ private:
     {
         if (!data_port_) return;
 
-        if (read_buf_.n_used >= read_buf_.nbytes)
+        // Drain the port each tick instead of reading a single buffer:
+        // one read per tick caps ethernet at one datagram per poll interval
+        // and drops data at high message rates. Bounded to keep the
+        // executor responsive.
+        constexpr int kMaxReadsPerTick = 16;
+        for (int reads = 0; reads < kMaxReadsPerTick; ++reads)
         {
-            read_buf_.nbytes = static_cast<int>(
-                data_port_->get_data(read_buf_.buff, MAX_BUF_LEN));
-            read_buf_.n_used = 0;
+            if (read_buf_.n_used >= read_buf_.nbytes)
+            {
+                read_buf_.nbytes = static_cast<int>(
+                    data_port_->get_data(read_buf_.buff, MAX_BUF_LEN));
+                read_buf_.n_used = 0;
+                if (read_buf_.nbytes <= 0)
+                    break;
+            }
+            process_read_buffer();
         }
+    }
 
+    void process_read_buffer()
+    {
         while (read_buf_.n_used < read_buf_.nbytes)
         {
             int ret = input_a1_data(&a1buff_,
@@ -437,13 +488,13 @@ private:
                     store_last_imu(decoded_val);
                     is_ok = true;
                 }
-                else if (num >= 10 && strstr(val[0], "APIM1") != nullptr)
+                else if (num >= 11 && strstr(val[0], "APIM1") != nullptr)
                 {
                     decode_ascii_im1(val, num, decoded_val);
                     publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
                     is_ok = true;
                 }
-                else if (num >= 17 && strstr(val[0], "APCOV") != nullptr)
+                else if (num >= 20 && strstr(val[0], "APCOV") != nullptr)
                 {
                     decode_ascii_cov(val, decoded_val);
                     publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
@@ -476,6 +527,15 @@ private:
 
 
     // ── RTCM handler ──────────────────────────────────────────────────
+
+    // The decoders memcpy a fixed-size packed struct from the payload at
+    // buf+5 (3-byte frame header + 12-bit type + 4-bit subtype), so the
+    // frame length (nlen = payload + 3) must cover struct size + 5.
+    bool rtcm_payload_covers(size_t struct_size) const
+    {
+        return a1buff_.nlen >= static_cast<int>(struct_size) + 5;
+    }
+
     bool handle_rtcm_message(double *decoded_val)
     {
         if (a1buff_.type != 4058 || a1buff_.crc)
@@ -485,6 +545,8 @@ private:
 
         switch (a1buff_.subtype) {
         case 1: // IMU
+            if (!rtcm_payload_covers(sizeof(rtcm_old_apimu_t)))
+                return false;
             decode_rtcm_imu_msg(decoded_val, a1buff_);
             publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
             health_msg_.add_imu_message(decoded_val);
@@ -492,6 +554,8 @@ private:
             return true;
 
         case 2: { // GPS PVT
+            if (!rtcm_payload_covers(sizeof(rtcm_apgps_t)))
+                return false;
             int ant_id = decode_rtcm_gps_msg(decoded_val, a1buff_);
             if (GPS1 == ant_id) {
                 publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
@@ -504,12 +568,16 @@ private:
         }
 
         case 3: // Dual antenna heading
+            if (!rtcm_payload_covers(sizeof(rtcm_aphdr_t)))
+                return false;
             decode_rtcm_hdg_msg(decoded_val, a1buff_);
             publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
             health_msg_.add_hdg_message(decoded_val);
             return true;
 
         case 4: // INS
+            if (!rtcm_payload_covers(sizeof(rtcm_apins_t)))
+                return false;
             decode_rtcm_ins_msg(decoded_val, a1buff_);
             publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
             health_msg_.add_ins_message(decoded_val);
@@ -518,11 +586,15 @@ private:
             return true;
 
         case 6: // IM1
+            if (!rtcm_payload_covers(sizeof(rtcm_apim1_t)))
+                return false;
             decode_rtcm_im1_msg(decoded_val, a1buff_);
             publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
             return true;
 
         case 10: // APCOV
+            if (!rtcm_payload_covers(sizeof(rtcm_apcov_t)))
+                return false;
             decode_rtcm_cov_msg(decoded_val, a1buff_);
             publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
             store_last_cov(decoded_val);
@@ -542,6 +614,8 @@ private:
 
     void store_last_cov(const double val[])
     {
+        cov_received_ = true;
+
         // Orientation covariance (deg^2) indices 13-18
         cov_cache_.orient[0] = val[13]; // roll-roll
         cov_cache_.orient[1] = val[16]; // roll-pitch
@@ -567,32 +641,30 @@ private:
 
     void publish_ros_imu_and_nav(const double ins[], rclcpp::Time stamp)
     {
-        // ── sensor_msgs/Imu ──
+        // ── sensor_msgs/Imu (REP-103: ENU orientation, FLU body axes) ──
         auto imu_msg = sensor_msgs::msg::Imu();
         imu_msg.header.stamp = stamp;
         imu_msg.header.frame_id = frame_imu_;
 
-        double roll_r  = ins[9]  * kDeg2Rad;
-        double pitch_r = ins[10] * kDeg2Rad;
-        double hdg_r   = ins[11] * kDeg2Rad;
-
-        tf2::Quaternion q;
-        q.setRPY(roll_r, pitch_r, hdg_r);
+        tf2::Quaternion q = ned_rpy_deg_to_enu_quat(ins[9], ins[10], ins[11]);
         imu_msg.orientation.x = q.x();
         imu_msg.orientation.y = q.y();
         imu_msg.orientation.z = q.z();
         imu_msg.orientation.w = q.w();
 
         imu_msg.angular_velocity.x = imu_cache_.wx * kDeg2Rad;
-        imu_msg.angular_velocity.y = imu_cache_.wy * kDeg2Rad;
-        imu_msg.angular_velocity.z = imu_cache_.wz * kDeg2Rad;
+        imu_msg.angular_velocity.y = -imu_cache_.wy * kDeg2Rad;
+        imu_msg.angular_velocity.z = -imu_cache_.wz * kDeg2Rad;
 
         imu_msg.linear_acceleration.x = imu_cache_.ax * kGAccel;
-        imu_msg.linear_acceleration.y = imu_cache_.ay * kGAccel;
-        imu_msg.linear_acceleration.z = imu_cache_.az * kGAccel;
+        imu_msg.linear_acceleration.y = -imu_cache_.ay * kGAccel;
+        imu_msg.linear_acceleration.z = -imu_cache_.az * kGAccel;
 
+        // All-zero covariance means "unknown" per sensor_msgs convention,
+        // which is what cov_cache_ holds until the first APCOV arrives.
         for (int i = 0; i < 9; ++i)
-            imu_msg.orientation_covariance[i] = cov_cache_.orient[i] * kDeg2RadSq;
+            imu_msg.orientation_covariance[i] =
+                cov_cache_.orient[i] * kDeg2RadSq * kEnuCovSign[i];
 
         pub_ros_imu_->publish(imu_msg);
 
@@ -601,7 +673,9 @@ private:
         nav.header.stamp = stamp;
         nav.header.frame_id = frame_gnss_;
 
-        nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+        nav.status.status = (ins[2] >= 1.0)
+            ? sensor_msgs::msg::NavSatStatus::STATUS_FIX
+            : sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
         nav.status.service =
             sensor_msgs::msg::NavSatStatus::SERVICE_GPS |
             sensor_msgs::msg::NavSatStatus::SERVICE_GLONASS |
@@ -622,7 +696,9 @@ private:
         nav.position_covariance[6] = cov_cache_.pos[5]; // lon-alt
         nav.position_covariance[7] = cov_cache_.pos[2]; // lat-alt
         nav.position_covariance[8] = cov_cache_.pos[8]; // alt-alt
-        nav.position_covariance_type = sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN;
+        nav.position_covariance_type = cov_received_
+            ? sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN
+            : sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
 
         pub_navfix_->publish(nav);
     }
@@ -676,6 +752,7 @@ private:
     health_message health_msg_;
     ImuCache imu_cache_;
     CovCache cov_cache_;
+    bool cov_received_ = false;
 };
 
 } // namespace anello
@@ -716,7 +793,7 @@ static int input_a1_data(a1buff_t *a1, uint8_t data)
 
     if (a1->nbyte == 0)
     {
-        memset(a1, 0, sizeof(a1buff_t));
+        *a1 = a1buff_t{};
     }
 
     if (a1->nbyte < 3)
@@ -730,7 +807,8 @@ static int input_a1_data(a1buff_t *a1, uint8_t data)
         // ASCII message
         if (data == ',')
         {
-            a1->loc[a1->nseg++] = a1->nbyte;
+            if (a1->nseg < MAXFIELD)
+                a1->loc[a1->nseg++] = a1->nbyte;
             if (a1->nseg == 2)
                 a1->nlen = 0;
         }
@@ -743,7 +821,8 @@ static int input_a1_data(a1buff_t *a1, uint8_t data)
             {
                 if (a1->nbyte > 3 && a1->buf[a1->nbyte - 4] == '*')
                 {
-                    a1->loc[a1->nseg++] = a1->nbyte - 4;
+                    if (a1->nseg < MAXFIELD)
+                        a1->loc[a1->nseg++] = a1->nbyte - 4;
                     ret = 1;
                 }
             }
