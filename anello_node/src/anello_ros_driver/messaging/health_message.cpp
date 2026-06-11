@@ -17,8 +17,14 @@
 #include <cmath>
 #include "health_message.h"
 
+// Gross-fault gate on the MEMS-vs-FOG window-mean difference. The noise
+// floor of the comparison is sigma_d = sqrt(ARW_mems^2 + ARW_fog^2 / N/Fs)
+// ~ 5e-3 deg/s for a 1 s window, so 0.25 deg/s is a ~50-sigma gate: it
+// cannot false-alarm on sensor noise, still covers a 1000 ppm
+// scale-factor mismatch at 100 deg/s, and detects real failures 8x
+// sooner than the previous 2 deg/s gate (which was ~400 sigma).
 #ifndef GYRO_DISCREPANCY_THRESHOLD
-#define GYRO_DISCREPANCY_THRESHOLD 2   // deg/s
+#define GYRO_DISCREPANCY_THRESHOLD 0.25 // deg/s
 #endif
 
 #ifndef HEADING_STABILITY_THRESHOLD
@@ -35,6 +41,26 @@
 
 #ifndef GPS_HEADING_ACC_GOOD_THRESHOLD
 #define GPS_HEADING_ACC_GOOD_THRESHOLD 1
+#endif
+
+// GNSS course-over-ground accuracy degrades as atan(sigma_v/speed): with
+// ~0.05 m/s Doppler accuracy the 3 deg heading threshold is only a
+// 1-sigma test at 1 m/s (false streaks while maneuvering slowly) but
+// ~2-3 sigma at 2 m/s and above. Receivers also freeze COG near
+// standstill. Gate the GPS-vs-INS heading comparison on speed.
+#ifndef GPS_HEADING_MIN_SPEED
+#define GPS_HEADING_MIN_SPEED 2.0 // m/s
+#endif
+
+// Stuck-channel floors: a healthy channel's per-sample std is
+// ARW * sqrt(Fs); these are 0.2x that at the slowest ODR (20 Hz), the
+// worst case across 20-200 Hz (MEMS ARW 0.3 deg/sqrt-hr, FOG 0.05).
+// P(std < 0.2 sigma | N=100) < 1e-40, so false alarms are negligible.
+#ifndef STUCK_STD_FLOOR_MEMS
+#define STUCK_STD_FLOOR_MEMS 4.5e-3 // deg/s
+#endif
+#ifndef STUCK_STD_FLOOR_FOG
+#define STUCK_STD_FLOOR_FOG 7.4e-4 // deg/s
 #endif
 
 #ifndef HEADING_MISMATCH_COUNT_TH
@@ -213,8 +239,13 @@ void health_message::add_gps_message(double *gps_msg)
     this->gps_heading_acc = gps_msg[14];
     this->rtk_status = gps_msg[15];
 
-    // tell the system to check gps vs ins at next ins message
-    this->gps_read_flag = true;
+    // Only schedule the gps-vs-ins heading comparison when moving fast
+    // enough for course-over-ground to be meaningful; below
+    // GPS_HEADING_MIN_SPEED the streak counter must not accumulate.
+    if (gps_msg[6] >= GPS_HEADING_MIN_SPEED)
+    {
+        this->gps_read_flag = true;
+    }
 }
 
 void health_message::add_hdg_message(double *hdg_msg)
@@ -292,13 +323,21 @@ bool health_message::has_gyro_discrepancy() const
             return false;
         }
 
+        // An exactly-zero FOG window means the optical gyro is disabled
+        // (APCFG fog off), not stuck — nothing to compare against.
+        if (this->wz_fog_moving_average == 0.0 && this->wz_fog_std_dev == 0.0)
+        {
+            return false;
+        }
+
         double diff = fabs(this->wz_mems_moving_average - this->wz_fog_moving_average);
         if (diff > GYRO_DISCREPANCY_THRESHOLD)
         {
             ret_val = true;
         }
 
-        if (wz_mems_std_dev < 1e-4 || wz_fog_std_dev < 1e-4)
+        if (wz_mems_std_dev < STUCK_STD_FLOOR_MEMS ||
+            wz_fog_std_dev < STUCK_STD_FLOOR_FOG)
         {
             ret_val = true;
         }
