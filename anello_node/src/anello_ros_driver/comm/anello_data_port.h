@@ -39,7 +39,7 @@ private:
     void port_confirm_uart();
     void port_confirm_ethernet();
 
-    size_t get_data_uart(char *buf, size_t buf_len);
+    size_t get_data_uart(char *buf, size_t buf_len, int timeout_ms);
     size_t get_data_ethernet(char *buf, size_t buf_len);
 
     void write_data_uart(const char *buf, size_t buf_len);
@@ -58,6 +58,10 @@ public:
      */
     void init();
     size_t get_data(char *buf, size_t buf_len);
+    /* timeout_ms applies to UART reads only (select() bound); ethernet
+     * reads are always non-blocking. A 0 ms UART poll that returns empty
+     * does not count toward port rotation. */
+    size_t get_data(char *buf, size_t buf_len, int timeout_ms);
     void write_data(const char *buf, size_t buf_len);
 
     void port_parse_fail();

@@ -158,7 +158,7 @@ default (`/sys/bus/usb-serial/devices/*/latency_timer`) to 1 ms.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `heading_baseline` | `0.0` | Dual-antenna baseline length in meters, used to validate APHDG heading in the health monitor (`0.0` = skip the baseline check) |
+| `heading_baseline` | `0.0` | Dual-antenna baseline length in meters, used to validate APHDG heading in the health monitor. When left at `0.0` the driver queries the device (`APVEH,R,bsl`) once at startup; if that also fails, the baseline check is skipped |
 
 #### Standard IMU Output (REP-145)
 
@@ -224,6 +224,7 @@ All custom messages include a `std_msgs/Header` with timestamp and frame ID. Mes
 | `imu/data` | `sensor_msgs/Imu` | Same as `imu/data_raw` plus the INS orientation quaternion, published at the INS rate |
 | `gps/fix` | `sensor_msgs/NavSatFix` | Raw GNSS fix from APGPS (4 Hz), covariance approximated from the receiver accuracy estimates. Feed this (not `ins/fix`) to `navsat_transform_node` — fusing the INS position back in would double-count the IMU |
 | `ins/fix` | `sensor_msgs/NavSatFix` | INS-fused position at the INS rate, with the full EKF covariance from APCOV when available |
+| `odom` | `nav_msgs/Odometry` | INS solution at the INS rate: pose in a local ENU frame anchored at the first valid fix (frame `tf_parent_frame` → `frame_id.ins`), twist in the body (FLU) frame. Pose covariance from APCOV position/orientation; twist linear covariance from the APCOV velocity covariance rotated into the body frame; angular covariance from the `covariance.angular_velocity` parameter |
 | `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA sentence forwarded to NTRIP caster |
 
 **Frame conventions:** the `anello/*` custom topics carry values in the
@@ -245,6 +246,10 @@ The driver publishes to `/diagnostics` via `diagnostic_updater` with:
 - Position accuracy status (cm / m / >1m)
 - Heading stability (stable / unstable)
 - Gyro health (good / bad)
+- Decoded message rate and error rate over a 5 s sliding window (a
+  device that stops streaming raises ERROR instead of reporting the
+  last known health flags)
+- Lifetime message / checksum-failure / parse-failure counters
 - Active port names
 
 ### Subscribed Topics
@@ -282,7 +287,7 @@ ros2 service call /anello/send_cmd anello_interfaces/srv/CmdAndRsp "{command: 'A
 | `wx`, `wy`, `wz` | `float64` | deg/s | Angular rate (MEMS) |
 | `wz_fog` | `float64` | deg/s | High-precision z-axis angular rate (optical) |
 | `odometer_speed` | `float64` | m/s | Odometer speed |
-| `odometer_time` | `float64` | ms | Odometer timestamp |
+| `odometer_time` | `float64` | s | Odometer timestamp (seconds, unlike `mcu_time`) |
 | `temp` | `float64` | C | Temperature |
 
 ### APINS

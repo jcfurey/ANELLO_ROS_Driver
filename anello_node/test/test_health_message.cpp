@@ -110,6 +110,24 @@ TEST(GyroHealth, SmallDiscrepancyWithinGateIsGood)
     EXPECT_EQ(h.get_gyro_status(), GYRO_GOOD);
 }
 
+TEST(GyroHealth, FogDropoutSamplesAreSkipped)
+{
+    health_message h;
+    // Steady 5 deg/s rotation on both channels, but every 3rd FOG sample
+    // drops out to exactly 0. Skipping the zeros keeps the FOG mean at
+    // the true rate; averaging them in would bias it toward ~3.3 deg/s
+    // and trip a spurious discrepancy fault (gate is 0.25 deg/s).
+    double msg[16] = {};
+    for (int i = 0; i < kFill; ++i) {
+        const double s = (i % 2 == 0) ? 1.0 : -1.0;
+        msg[0] = 10.0 * i;
+        msg[6] = 5.0 + s * 0.05;
+        msg[7] = (i % 3 == 0) ? 0.0 : 5.0 + s * 0.01;
+        h.add_imu_message(msg);
+    }
+    EXPECT_EQ(h.get_gyro_status(), GYRO_GOOD);
+}
+
 TEST(GyroHealth, FogSaturationIsNotAFault)
 {
     health_message h;

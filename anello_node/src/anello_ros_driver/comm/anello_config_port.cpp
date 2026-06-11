@@ -135,12 +135,30 @@ void anello_config_port::init_ethernet()
 {
     this->ethernet_port.init();
 
+    // Mirror init_uart's handshake validation: send #APPNG and look for
+    // the echo. Without this, a wrong remote_ip or a firewall left the
+    // node looking "initialized" while the device never responded.
     std::string command = "#APPNG*48\r\n";
-    char buf[100] = {0};
+    constexpr int max_attempts = 5;
 
-    this->ethernet_port.write_data(command.c_str(), command.length());
-    usleep(500 * 1000);
-    this->ethernet_port.get_data(buf, 100);
+    for (int attempt = 1; attempt <= max_attempts; ++attempt)
+    {
+        char buf[100] = {0};
+        this->ethernet_port.write_data(command.c_str(), command.length());
+        size_t n = this->ethernet_port.get_data(buf, sizeof(buf) - 1, 500);
+        if (n > 0 && strstr(buf, "#APPNG") != nullptr)
+        {
+            DEBUG_PRINT("Config port (eth) confirmed at %s",
+                        this->config.remote_ip.c_str());
+            return;
+        }
+        WARNING_PRINT("Config port (eth): no #APPNG response from %s (attempt %d/%d)",
+                      this->config.remote_ip.c_str(), attempt, max_attempts);
+    }
+    // Not fatal: data may still flow on the data channel; commands won't work.
+    ERROR_PRINT("Config port (eth): no ANELLO device responded at %s after %d "
+                "attempts. Check remote_ip, ports, and firewall.",
+                this->config.remote_ip.c_str(), max_attempts);
 }
 
 size_t anello_config_port::get_data(char *buf, size_t buf_len)

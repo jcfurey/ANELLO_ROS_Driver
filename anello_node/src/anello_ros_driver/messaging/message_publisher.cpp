@@ -32,7 +32,7 @@
 #include <nmea_msgs/msg/sentence.hpp>
 #include <std_msgs/msg/header.hpp>
 
-void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time, const std::string &frame_id)
+void publish_gga(double *gps, const gga_pub_t &pub, rclcpp::Time time, const std::string &frame_id)
 {
     std_msgs::msg::Header msg_header;
     nmea_msgs::msg::Sentence gga_message;
@@ -110,16 +110,19 @@ void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time, const std::strin
     gngga_message << ",";
     gngga_message << "";
 
-    std::string ck = compute_checksum(gngga_message.str().c_str() + 1, gngga_message.str().length() - 1);
-    gngga_message << "*" << ck << "\r\n";
+    // Materialize the sentence once: each .str() call copies the whole
+    // buffer.
+    std::string sentence = gngga_message.str();
+    std::string ck = compute_checksum(sentence.c_str() + 1, sentence.length() - 1);
+    sentence += "*" + ck + "\r\n";
 
     gga_message.header = msg_header;
-    gga_message.sentence = gngga_message.str();
+    gga_message.sentence = std::move(sentence);
 
     pub->publish(gga_message);
 }
 
-void publish_gps(double *gps, gps_pub_t pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_gps(double *gps, const gps_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APGPS msg;
 
@@ -146,7 +149,7 @@ void publish_gps(double *gps, gps_pub_t pub, rclcpp::Time stamp, const std::stri
     pub->publish(msg);
 }
 
-void publish_gp2(double *gp2, gps_pub_t pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_gp2(double *gp2, const gps_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APGPS msg;
 
@@ -173,7 +176,7 @@ void publish_gp2(double *gp2, gps_pub_t pub, rclcpp::Time stamp, const std::stri
     pub->publish(msg);
 }
 
-void publish_hdr(double *hdr, hdg_pub_t pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_hdr(double *hdr, const hdg_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     uint16_t status = static_cast<uint16_t>(hdr[9]);
 
@@ -205,7 +208,7 @@ void publish_hdr(double *hdr, hdg_pub_t pub, rclcpp::Time stamp, const std::stri
     pub->publish(msg);
 }
 
-void publish_imu(double *imu, imu_pub_t pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_imu(double *imu, const imu_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APIMU msg;
 
@@ -228,7 +231,7 @@ void publish_imu(double *imu, imu_pub_t pub, rclcpp::Time stamp, const std::stri
     pub->publish(msg);
 }
 
-void publish_im1(double *im1, im1_pub_t pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_im1(double *im1, const im1_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APIM1 msg;
 
@@ -249,7 +252,7 @@ void publish_im1(double *im1, im1_pub_t pub, rclcpp::Time stamp, const std::stri
     pub->publish(msg);
 }
 
-void publish_ins(double *ins, ins_pub_t pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_ins(double *ins, const ins_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APINS msg;
 
@@ -273,7 +276,7 @@ void publish_ins(double *ins, ins_pub_t pub, rclcpp::Time stamp, const std::stri
     pub->publish(msg);
 }
 
-void publish_cov(double *cov, apcov_pub_t pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_cov(double *cov, const apcov_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APCOV msg;
 
@@ -303,7 +306,7 @@ void publish_cov(double *cov, apcov_pub_t pub, rclcpp::Time stamp, const std::st
     pub->publish(msg);
 }
 
-void publish_health(const health_message *health_msg, health_pub_t pub, rclcpp::Time stamp)
+void publish_health(const health_message *health_msg, const health_pub_t &pub, rclcpp::Time stamp)
 {
     anello_interfaces::msg::APHEALTH msg;
 
