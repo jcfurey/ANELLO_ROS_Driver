@@ -22,6 +22,9 @@ _SUCCESS_RESPONSES = [
 _UNAUTHORIZED_RESPONSES = [
     '401'
 ]
+_NOT_FOUND_RESPONSES = [
+    '404'
+]
 
 
 class NTRIPClient:
@@ -95,6 +98,11 @@ class NTRIPClient:
         self._first_rtcm_received = False
         self._recv_rtcm_last_packet_timestamp = 0
 
+        # Response stream state set up by connect()
+        self._pending_stream_data = b''
+        self._response_chunked = False
+        self._chunk_buffer = b''
+
         # Public reconnect info
         self.reconnect_attempt_max = self.DEFAULT_RECONNECT_ATTEMPT_MAX
         self.reconnect_attempt_wait_seconds = \
@@ -147,15 +155,35 @@ class NTRIPClient:
         # Get the response from the server
         response = ''
         try:
-            response = self._server_socket.recv(
-                _CHUNK_SIZE
-            ).decode('utf-8')
+            raw_response = self._server_socket.recv(_CHUNK_SIZE)
         except Exception as e:
             self._logerr(
                 'Unable to read response from server at '
                 'http://{}:{}'.format(self._host, self._port))
             self._logerr('Exception: {}'.format(str(e)))
             return False
+
+        # The first packet may already contain stream data after the
+        # response headers; split on the header terminator so binary
+        # RTCM bytes are neither decoded as text nor thrown away.
+        header_end = raw_response.find(b'\r\n\r\n')
+        if header_end >= 0:
+            header_bytes = raw_response[:header_end + 4]
+            self._pending_stream_data = raw_response[header_end + 4:]
+        else:
+            header_bytes = raw_response
+            self._pending_stream_data = b''
+        response = header_bytes.decode('utf-8', errors='replace')
+
+        # NTRIP rev2 casters stream with HTTP/1.1 chunked transfer
+        # encoding; the chunk framing must be stripped before the RTCM
+        # parser sees the data.
+        self._response_chunked = any(
+            line.lower().startswith('transfer-encoding:')
+            and 'chunked' in line.lower()
+            for line in response.split('\r\n')
+        )
+        self._chunk_buffer = b''
 
         # Properly handle the response
         if any(success in response for success in _SUCCESS_RESPONSES):
@@ -180,6 +208,14 @@ class NTRIPClient:
                 'Received unauthorized response from the server. '
                 'Check your username, password, and mountpoint to '
                 'make sure they are correct.')
+            known_error = True
+        elif any(
+            not_found in response
+            for not_found in _NOT_FOUND_RESPONSES
+        ):
+            self._logwarn(
+                'Received not-found response from the server. '
+                'The mountpoint specified is probably not valid.')
             known_error = True
         elif not self._connected and (
             self._ntrip_version is None
@@ -329,11 +365,20 @@ class NTRIPClient:
             self.reconnect()
             self._first_rtcm_received = False
 
+        # Stream bytes that arrived in the same packet as the connect()
+        # response headers are consumed first.
+        pending = self._pending_stream_data
+        self._pending_stream_data = b''
+
         # Check if there is any data available on the socket
         read_sockets, _, _ = select.select(
             [self._server_socket], [], [], 0
         )
         if not read_sockets:
+            if pending:
+                if self._response_chunked:
+                    pending = self._dechunk(pending)
+                return self._rtcm_parser.parse(pending) if pending else []
             return []
 
         # Since we only ever pass the server socket to the list of
@@ -392,28 +437,72 @@ class NTRIPClient:
         # Parse the byte stream into complete, checksum-verified RTCM
         # frames so each published rtcm_msgs/Message holds exactly one
         # RTCM message (partial frames are cached until the rest arrives)
+        data = pending + data
+        if self._response_chunked:
+            data = self._dechunk(data)
         return self._rtcm_parser.parse(data) if data else []
+
+    def _dechunk(self, data):
+        # Incremental HTTP/1.1 chunked transfer-encoding decoder: strips
+        # the hex chunk-size lines and trailing CRLFs, returning only
+        # payload bytes. Incomplete chunks are buffered until more data
+        # arrives.
+        self._chunk_buffer += data
+        payload = b''
+        while True:
+            size_end = self._chunk_buffer.find(b'\r\n')
+            if size_end < 0:
+                break
+            size_token = self._chunk_buffer[:size_end].split(b';')[0].strip()
+            try:
+                chunk_size = int(size_token, 16)
+            except ValueError:
+                # Lost framing (e.g. mid-stream join): pass the buffer
+                # through so the RTCM parser can resync on the preamble.
+                self._logwarn(
+                    'Invalid chunk size {}, passing data through'.format(
+                        size_token[:16]))
+                payload += self._chunk_buffer
+                self._chunk_buffer = b''
+                break
+            if chunk_size == 0:
+                # Terminating chunk: the server is ending the stream
+                self._chunk_buffer = b''
+                break
+            chunk_end = size_end + 2 + chunk_size + 2
+            if len(self._chunk_buffer) < chunk_end:
+                break
+            payload += self._chunk_buffer[size_end + 2:size_end + 2 + chunk_size]
+            self._chunk_buffer = self._chunk_buffer[chunk_end:]
+        return payload
 
     def shutdown(self):
         # Set some state, and then disconnect
         self._shutdown = True
         self.disconnect()
 
+    def _is_ntrip_v2(self):
+        return (
+            self._ntrip_version is not None
+            and '2' in str(self._ntrip_version)
+        )
+
     def _form_request(self):
+        # NTRIP rev2 is proper HTTP/1.1 and requires the Host and
+        # Ntrip-Version headers; rev1 casters expect an HTTP/1.0 request.
+        # The Host header is legal in HTTP/1.0 too, so always send it.
+        http_version = 'HTTP/1.1' if self._is_ntrip_v2() else 'HTTP/1.0'
+        request_str = (
+            'GET /{} {}\r\n'
+            'Host: {}:{}\r\n'
+        ).format(self._mountpoint, http_version, self._host, self._port)
         if (
             self._ntrip_version is not None
             and self._ntrip_version != ''
         ):
-            request_str = (
-                'GET /{} HTTP/1.0\r\n'
-                'Ntrip-Version: {}\r\n'
-                'User-Agent: NTRIP ntrip_client_ros\r\n'
-            ).format(self._mountpoint, self._ntrip_version)
-        else:
-            request_str = (
-                'GET /{} HTTP/1.0\r\n'
-                'User-Agent: NTRIP ntrip_client_ros\r\n'
-            ).format(self._mountpoint)
+            request_str += 'Ntrip-Version: {}\r\n'.format(
+                self._ntrip_version)
+        request_str += 'User-Agent: NTRIP ntrip_client_ros\r\n'
         if self._basic_credentials is not None:
             request_str += 'Authorization: Basic {}\r\n'.format(
                 self._basic_credentials)

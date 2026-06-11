@@ -8,10 +8,12 @@
  * License:     MIT License
  ********************************************************************************/
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <vector>
 #include <unistd.h>
 #include <iomanip>
 #include <memory>
@@ -94,6 +96,7 @@ struct ImuCache
 {
     double ax = 0.0, ay = 0.0, az = 0.0;
     double wx = 0.0, wy = 0.0, wz = 0.0;
+    double wz_fog = 0.0;
 };
 
 struct CovCache
@@ -107,6 +110,58 @@ struct ReadBuffer
     int n_used = 0;
     int nbytes = 0;
     char buff[MAX_BUF_LEN] = {};
+    rclcpp::Time stamp;  // host time captured at the port read
+};
+
+/* One-way device->host clock translator (Olson, IROS 2010 "A passive
+ * solution to the sensor synchronization problem"): transport latency
+ * only ever adds to arrival time, so the true clock offset is bounded
+ * by the minimum observed (arrival - device) delta. Tracking that
+ * minimum and letting it creep upward by a bounded drift rate gives
+ * stamps whose dt follows the device clock, free of serial/OS jitter,
+ * and provably never worse than arrival stamping. */
+class ClockTranslator
+{
+public:
+    void update(double device_s, double arrival_s)
+    {
+        if (have_last_ && device_s + 1e-6 < last_device_s_)
+        {
+            reset();  // device time went backwards: unit rebooted
+        }
+        if (have_last_ && n_samples_ > 0)
+        {
+            // Absorb relative oscillator drift (bounded at 200 ppm)
+            min_offset_ += kDriftBound * (device_s - last_device_s_);
+        }
+        const double offset = arrival_s - device_s;
+        if (n_samples_ == 0 || offset < min_offset_)
+        {
+            min_offset_ = offset;
+        }
+        last_device_s_ = device_s;
+        have_last_ = true;
+        if (n_samples_ < kWarmupSamples)
+        {
+            n_samples_++;
+        }
+    }
+    bool ready() const { return n_samples_ >= kWarmupSamples; }
+    double translate(double device_s) const { return device_s + min_offset_; }
+    void reset()
+    {
+        n_samples_ = 0;
+        have_last_ = false;
+        min_offset_ = 0.0;
+    }
+
+private:
+    static constexpr double kDriftBound = 200e-6;
+    static constexpr int kWarmupSamples = 100;
+    double min_offset_ = 0.0;
+    double last_device_s_ = 0.0;
+    bool have_last_ = false;
+    int n_samples_ = 0;
 };
 
 
@@ -175,9 +230,45 @@ private:
         declare_parameter("poll_interval_ms", 5,
             d("Main loop polling interval in milliseconds"));
 
+        declare_parameter("timestamp_source", "arrival",
+            d("Header stamp source: 'arrival' = host time at the port "
+              "read (default); 'mcu' = device MCU time translated to host "
+              "time with a minimum-offset filter, eliminating serial/OS "
+              "arrival jitter from inter-message timing"));
+
         declare_parameter("heading_baseline", 0.0,
             d("Dual-antenna baseline length in meters, used to validate the "
               "APHDG heading in the health monitor (0.0 = skip the check)"));
+
+        // The at-rest accelerometer sign convention is not stated in the
+        // public manual. The FLU conversion below assumes the device
+        // reports specific force in FRD (at rest: AZ = -1 g), but the
+        // manual's example APIMU capture shows AZ = +1 g upright, which
+        // would make every published axis inverted. Bench check: with the
+        // vehicle stationary, imu/data linear_acceleration.z must read
+        // +9.8; if it reads -9.8, set this parameter true.
+        declare_parameter("flip_accel_sign", false,
+            d("Negate all linear acceleration axes in imu/data and "
+              "imu/data_raw. Use when a stationary unit reports -9.8 "
+              "instead of +9.8 on linear_acceleration.z."));
+
+        declare_parameter("use_fog_wz", true,
+            d("Use the optical gyro (OG_WZ) for the z angular rate in the "
+              "standard imu/data and imu/data_raw messages instead of the "
+              "MEMS WZ. Set false if the FOG is disabled on the unit "
+              "(APCFG fog off)."));
+
+        // Defaults derived from the ANELLO GNSS INS datasheet noise specs at
+        // 100 Hz: MEMS gyro ARW 0.3 deg/sqrt(hr), optical Z gyro ARW
+        // 0.05 deg/sqrt(hr), accelerometer VRW 0.03 m/s/sqrt(hr).
+        declare_parameter("covariance.angular_velocity",
+            std::vector<double>{7.6e-7, 7.6e-7, 2.1e-8},
+            d("Diagonal angular velocity covariance [x, y, z] in (rad/s)^2 "
+              "for imu/data and imu/data_raw (REP-145 parameter override)"));
+        declare_parameter("covariance.linear_acceleration",
+            std::vector<double>{2.5e-5, 2.5e-5, 2.5e-5},
+            d("Diagonal linear acceleration covariance [x, y, z] in "
+              "(m/s^2)^2 for imu/data and imu/data_raw"));
     }
 
     void read_parameters()
@@ -204,6 +295,31 @@ private:
         tf_parent_ = get_parameter("tf_parent_frame").as_string();
         poll_ms_ = get_parameter("poll_interval_ms").as_int();
         health_msg_.set_baseline(get_parameter("heading_baseline").as_double());
+        use_fog_wz_ = get_parameter("use_fog_wz").as_bool();
+        flip_accel_sign_ = get_parameter("flip_accel_sign").as_bool();
+
+        timestamp_source_ = get_parameter("timestamp_source").as_string();
+        if (timestamp_source_ != "arrival" && timestamp_source_ != "mcu") {
+            RCLCPP_WARN(get_logger(),
+                "Unknown timestamp_source '%s' — falling back to 'arrival'",
+                timestamp_source_.c_str());
+            timestamp_source_ = "arrival";
+        }
+        use_mcu_stamp_ = (timestamp_source_ == "mcu");
+
+        auto read_cov3 = [this](const char *name, double out[3]) {
+            auto v = get_parameter(name).as_double_array();
+            if (v.size() == 3) {
+                std::copy(v.begin(), v.end(), out);
+            } else {
+                RCLCPP_WARN(get_logger(),
+                    "%s must have exactly 3 elements, got %zu — using zeros "
+                    "(covariance unknown)", name, v.size());
+                std::fill(out, out + 3, 0.0);
+            }
+        };
+        read_cov3("covariance.angular_velocity", ang_vel_cov_);
+        read_cov3("covariance.linear_acceleration", lin_acc_cov_);
 
         RCLCPP_INFO(get_logger(), "com_type=%s baud=%u poll=%ldms",
                      com_type.c_str(), config_.baud_rate, poll_ms_);
@@ -260,7 +376,9 @@ private:
         pub_gga_ = create_publisher<nmea_msgs::msg::Sentence>("ntrip_client/nmea", 1);
 
         pub_ros_imu_ = create_publisher<sensor_msgs::msg::Imu>("imu/data", sensor_qos);
+        pub_ros_imu_raw_ = create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", sensor_qos);
         pub_navfix_ = create_publisher<sensor_msgs::msg::NavSatFix>("gps/fix", sensor_qos);
+        pub_ins_fix_ = create_publisher<sensor_msgs::msg::NavSatFix>("ins/fix", sensor_qos);
     }
 
     // ── Subscribers ────────────────────────────────────────────────────
@@ -439,6 +557,9 @@ private:
                 read_buf_.n_used = 0;
                 if (read_buf_.nbytes <= 0)
                     break;
+                // Arrival time captured at the read, not at parse —
+                // messages decoded later from this buffer share it.
+                read_buf_.stamp = now();
             }
             process_read_buffer();
         }
@@ -473,25 +594,27 @@ private:
                     num = 0;
                 }
 
-                auto stamp = now();
-
                 if (num >= 17 && strstr(val[0], "APGPS") != nullptr)
                 {
                     decode_ascii_gps(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
                     publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
+                    publish_navsat_from_gps(decoded_val, stamp);
                     health_msg_.add_gps_message(decoded_val);
                     is_ok = true;
                 }
                 else if (num >= 17 && strstr(val[0], "APGP2") != nullptr)
                 {
                     decode_ascii_gps(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);
                     is_ok = true;
                 }
                 else if (num >= 12 && strstr(val[0], "APHDG") != nullptr)
                 {
                     decode_ascii_hdr(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
                     health_msg_.add_hdg_message(decoded_val);
                     is_ok = true;
@@ -499,7 +622,9 @@ private:
                 else if (num >= 12 && strstr(val[0], "APIMU") != nullptr)
                 {
                     decode_ascii_imu(val, num, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
+                    publish_ros_imu_raw(decoded_val, stamp);
                     health_msg_.add_imu_message(decoded_val);
                     store_last_imu(decoded_val);
                     is_ok = true;
@@ -507,12 +632,15 @@ private:
                 else if (num >= 11 && strstr(val[0], "APIM1") != nullptr)
                 {
                     decode_ascii_im1(val, num, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
+                    publish_ros_imu_raw(decoded_val, stamp);
                     is_ok = true;
                 }
                 else if (num >= 20 && strstr(val[0], "APCOV") != nullptr)
                 {
                     decode_ascii_cov(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
                     store_last_cov(decoded_val);
                     is_ok = true;
@@ -520,6 +648,7 @@ private:
                 else if (num >= 14 && strstr(val[0], "APINS") != nullptr)
                 {
                     decode_ascii_ins(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
                     health_msg_.add_ins_message(decoded_val);
                     publish_ros_imu_and_nav(decoded_val, stamp);
@@ -542,6 +671,26 @@ private:
     }
 
 
+    // Stamp for a decoded message whose first field is the device MCU
+    // time in ms. In 'mcu' mode the translator is fed every message
+    // (the highest-rate stream keeps it tight) and used once warmed up.
+    rclcpp::Time stamp_from_mcu(double mcu_ms)
+    {
+        if (use_mcu_stamp_)
+        {
+            const double device_s = mcu_ms * 1e-3;
+            clock_translator_.update(device_s, read_buf_.stamp.seconds());
+            if (clock_translator_.ready())
+            {
+                return rclcpp::Time(
+                    static_cast<int64_t>(
+                        clock_translator_.translate(device_s) * 1e9),
+                    read_buf_.stamp.get_clock_type());
+            }
+        }
+        return read_buf_.stamp;
+    }
+
     // ── RTCM handler ──────────────────────────────────────────────────
 
     // The decoders memcpy a fixed-size packed struct from the payload at
@@ -557,14 +706,18 @@ private:
         if (a1buff_.type != 4058 || a1buff_.crc)
             return false;
 
-        auto stamp = now();
+        // All subtypes carry the device MCU time as decoded_val[0] (ms),
+        // so the stamp is computed after each decode.
+        rclcpp::Time stamp;
 
         switch (a1buff_.subtype) {
         case 1: // IMU
             if (!rtcm_payload_covers(sizeof(rtcm_old_apimu_t)))
                 return false;
             decode_rtcm_imu_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
+            publish_ros_imu_raw(decoded_val, stamp);
             health_msg_.add_imu_message(decoded_val);
             store_last_imu(decoded_val);
             return true;
@@ -573,9 +726,11 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apgps_t)))
                 return false;
             int ant_id = decode_rtcm_gps_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             if (GPS1 == ant_id) {
                 publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
                 publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
+                publish_navsat_from_gps(decoded_val, stamp);
                 health_msg_.add_gps_message(decoded_val);
             } else {
                 publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);
@@ -587,6 +742,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_aphdr_t)))
                 return false;
             decode_rtcm_hdg_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
             health_msg_.add_hdg_message(decoded_val);
             return true;
@@ -595,6 +751,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apins_t)))
                 return false;
             decode_rtcm_ins_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
             health_msg_.add_ins_message(decoded_val);
             publish_ros_imu_and_nav(decoded_val, stamp);
@@ -605,13 +762,16 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apim1_t)))
                 return false;
             decode_rtcm_im1_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
+            publish_ros_imu_raw(decoded_val, stamp);
             return true;
 
         case 10: // APCOV
             if (!rtcm_payload_covers(sizeof(rtcm_apcov_t)))
                 return false;
             decode_rtcm_cov_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
             store_last_cov(decoded_val);
             return true;
@@ -626,11 +786,69 @@ private:
     {
         imu_cache_.ax = val[1]; imu_cache_.ay = val[2]; imu_cache_.az = val[3];
         imu_cache_.wx = val[4]; imu_cache_.wy = val[5]; imu_cache_.wz = val[6];
+        imu_cache_.wz_fog = val[7];
+    }
+
+    // Body-frame measurements converted FRD -> FLU and to SI units, shared
+    // by imu/data and imu/data_raw.
+    void fill_imu_body_measurements(sensor_msgs::msg::Imu &msg,
+                                    const ImuCache &imu) const
+    {
+        const double wz = use_fog_wz_ ? imu.wz_fog : imu.wz;
+        msg.angular_velocity.x = imu.wx * kDeg2Rad;
+        msg.angular_velocity.y = -imu.wy * kDeg2Rad;
+        msg.angular_velocity.z = -wz * kDeg2Rad;
+
+        const double accel_sign = flip_accel_sign_ ? -1.0 : 1.0;
+        msg.linear_acceleration.x = accel_sign * imu.ax * kGAccel;
+        msg.linear_acceleration.y = accel_sign * -imu.ay * kGAccel;
+        msg.linear_acceleration.z = accel_sign * -imu.az * kGAccel;
+
+        // Diagonal covariances from parameters; all-zero still means
+        // "unknown" per REP-145. The FRD->FLU axis flips do not change a
+        // diagonal covariance.
+        for (int i = 0; i < 3; ++i) {
+            msg.angular_velocity_covariance[4 * i] = ang_vel_cov_[i];
+            msg.linear_acceleration_covariance[4 * i] = lin_acc_cov_[i];
+        }
+    }
+
+    // REP-145 imu/data_raw: accelerometer + gyroscope only, published at
+    // the sensor rate (every APIMU/APIM1). orientation_covariance[0] = -1
+    // marks the orientation field as unreported.
+    void publish_ros_imu_raw(const double val[], rclcpp::Time stamp)
+    {
+        ImuCache imu;
+        imu.ax = val[1]; imu.ay = val[2]; imu.az = val[3];
+        imu.wx = val[4]; imu.wy = val[5]; imu.wz = val[6];
+        imu.wz_fog = val[7];
+
+        auto msg = sensor_msgs::msg::Imu();
+        msg.header.stamp = stamp;
+        msg.header.frame_id = frame_imu_;
+        msg.orientation.w = 1.0;
+        msg.orientation_covariance[0] = -1.0;
+        fill_imu_body_measurements(msg, imu);
+
+        pub_ros_imu_raw_->publish(msg);
     }
 
     void store_last_cov(const double val[])
     {
         cov_received_ = true;
+
+        // APCOV position units are undocumented; all surveyed vendors emit
+        // m². A metre-level m² variance is >= ~1e-6; the same uncertainty
+        // in deg² would be ~1e-10 (1 m =~ 9e-6 deg of latitude), so the two
+        // interpretations are ~10 orders of magnitude apart. Warn once if
+        // the values look deg²-scaled.
+        if (!cov_scale_warned_ && val[1] > 0.0 && val[1] < 1.0e-8) {
+            cov_scale_warned_ = true;
+            RCLCPP_WARN(get_logger(),
+                "APCOV lat-lat covariance %.3e is suspiciously small for "
+                "m^2 — if the firmware reports deg^2, the NavSatFix "
+                "position covariance on ins/fix is misscaled", val[1]);
+        }
 
         // Orientation covariance (deg^2) indices 13-18
         cov_cache_.orient[0] = val[13]; // roll-roll
@@ -668,13 +886,7 @@ private:
         imu_msg.orientation.z = q.z();
         imu_msg.orientation.w = q.w();
 
-        imu_msg.angular_velocity.x = imu_cache_.wx * kDeg2Rad;
-        imu_msg.angular_velocity.y = -imu_cache_.wy * kDeg2Rad;
-        imu_msg.angular_velocity.z = -imu_cache_.wz * kDeg2Rad;
-
-        imu_msg.linear_acceleration.x = imu_cache_.ax * kGAccel;
-        imu_msg.linear_acceleration.y = -imu_cache_.ay * kGAccel;
-        imu_msg.linear_acceleration.z = -imu_cache_.az * kGAccel;
+        fill_imu_body_measurements(imu_msg, imu_cache_);
 
         // All-zero covariance means "unknown" per sensor_msgs convention,
         // which is what cov_cache_ holds until the first APCOV arrives.
@@ -684,10 +896,12 @@ private:
 
         pub_ros_imu_->publish(imu_msg);
 
-        // ── sensor_msgs/NavSatFix ──
+        // ── sensor_msgs/NavSatFix (INS-fused position on ins/fix) ──
+        // The raw GNSS solution goes out on gps/fix from the APGPS branch;
+        // this fused solution carries the INS EKF covariance from APCOV.
         auto nav = sensor_msgs::msg::NavSatFix();
         nav.header.stamp = stamp;
-        nav.header.frame_id = frame_gnss_;
+        nav.header.frame_id = frame_ins_;
 
         // APINS status: 0/8 = attitude only (8-10 are GPS-disabled variants),
         // 1/2/9/10 = position valid, 3/4 = RTK float/fix.
@@ -708,7 +922,13 @@ private:
         nav.longitude = ins[4];
         nav.altitude  = ins[5];
 
-        // ENU covariance: [lon,lat,alt] -> [ee,en,eu; ne,nn,nu; ue,un,uu]
+        // ENU covariance: [lon,lat,alt] -> [ee,en,eu; ne,nn,nu; ue,un,uu].
+        // APCOV units are not in the public manual; surveyed vendor practice
+        // (u-blox NAV-COV, NovAtel INSPVAX, Septentrio, NMEA GST) is m² in a
+        // local-level frame, and the covAltAlt naming (vs the explicitly-down
+        // covVd) indicates an up-positive altitude axis, so values pass
+        // through unconverted. store_last_cov() warns if the magnitudes
+        // look deg²-scaled.
         nav.position_covariance[0] = cov_cache_.pos[4]; // lon-lon
         nav.position_covariance[1] = cov_cache_.pos[1]; // lat-lon
         nav.position_covariance[2] = cov_cache_.pos[5]; // lon-alt
@@ -721,6 +941,58 @@ private:
         nav.position_covariance_type = cov_received_
             ? sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN
             : sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+
+        pub_ins_fix_->publish(nav);
+    }
+
+    // Raw GNSS solution on gps/fix: REP-145 consumers (notably
+    // robot_localization's navsat_transform_node) expect an unfused GNSS
+    // fix here — republishing the INS position would feed the IMU back
+    // into the fusion. Covariance is approximated from the receiver's
+    // horizontal/vertical accuracy estimates, as in the u-blox and NMEA
+    // ROS drivers.
+    void publish_navsat_from_gps(const double gps[], rclcpp::Time stamp)
+    {
+        auto nav = sensor_msgs::msg::NavSatFix();
+        nav.header.stamp = stamp;
+        nav.header.frame_id = frame_gnss_;
+
+        // APGPS FixType {0 none, 2 2D, 3 3D, 5 time-only};
+        // RTK status {0 SPP, 1 float, 2 fixed}.
+        const int fix_type = static_cast<int>(gps[11]);
+        const int rtk = static_cast<int>(gps[15]);
+        if (fix_type != 2 && fix_type != 3)
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+        else if (rtk == 1 || rtk == 2)
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX;
+        else
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+        nav.status.service =
+            sensor_msgs::msg::NavSatStatus::SERVICE_GPS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_GLONASS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_COMPASS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_GALILEO;
+
+        nav.latitude  = gps[2];
+        nav.longitude = gps[3];
+        nav.altitude  = gps[4];
+
+        // navsat_transform copies this covariance verbatim into the EKF
+        // measurement noise, and robot_localization replaces zeros with a
+        // 1e-6 epsilon (wildly overtrusting the fix) — so claim
+        // DIAGONAL_KNOWN only when the receiver reports real accuracies.
+        const double hacc = gps[8];
+        const double vacc = gps[9];
+        if (hacc > 0.0 && vacc > 0.0) {
+            nav.position_covariance[0] = hacc * hacc;
+            nav.position_covariance[4] = hacc * hacc;
+            nav.position_covariance[8] = vacc * vacc;
+            nav.position_covariance_type =
+                sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
+        } else {
+            nav.position_covariance_type =
+                sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+        }
 
         pub_navfix_->publish(nav);
     }
@@ -744,7 +1016,9 @@ private:
     health_pub_t pub_health_;
     gga_pub_t pub_gga_;
     ros_imu_pub_t pub_ros_imu_;
+    ros_imu_pub_t pub_ros_imu_raw_;
     navfix_pub_t pub_navfix_;
+    navfix_pub_t pub_ins_fix_;
 
     // Subscribers
     rclcpp::Subscription<rtcm_msgs::msg::Message>::SharedPtr sub_rtcm_;
@@ -768,6 +1042,13 @@ private:
     bool publish_tf_ = true;
     std::string tf_parent_;
     int64_t poll_ms_ = 5;
+    bool use_fog_wz_ = true;
+    bool flip_accel_sign_ = false;
+    double ang_vel_cov_[3] = {};
+    double lin_acc_cov_[3] = {};
+    std::string timestamp_source_ = "arrival";
+    bool use_mcu_stamp_ = false;
+    ClockTranslator clock_translator_;
 
     // Decode state
     ReadBuffer read_buf_;
@@ -776,6 +1057,7 @@ private:
     ImuCache imu_cache_;
     CovCache cov_cache_;
     bool cov_received_ = false;
+    bool cov_scale_warned_ = false;
 };
 
 } // namespace anello

@@ -5,6 +5,11 @@ ROS2 driver for [ANELLO Photonics](https://www.anellophotonics.com/) GNSS/INS de
 **New to ANELLO?** See the [Integration Guide](doc/integration_guide.md) for
 step-by-step instructions on wiring, configuring, and integrating the ANELLO
 EVK with your robotics platform (including `robot_localization` and Nav2).
+Using Ethernet as the primary link (recommended for robots)? Follow the
+[Ethernet Setup Guide](doc/ethernet_setup_guide.md) for mounting, unit
+configuration with the ANELLO user tool, and wiring into a ROS2 Jazzy stack.
+Before trusting outputs from a new install or driver upgrade, run the
+[Hardware Validation Checklist](doc/hardware_validation_checklist.md).
 
 ## Supported Products
 
@@ -109,7 +114,7 @@ All parameters can be set via the launch file or on the command line.
 | `uart_data_port` | `AUTO` | UART data port path, or `AUTO` for auto-detection |
 | `uart_config_port` | `AUTO` | UART config port path, `AUTO`, or `OFF` to disable |
 | `baud_rate` | `230400` | Serial baud rate (`115200`, `230400`, `460800`, `921600`). The EVK ships at `921600`; the Ground INS/IMU default is `230400` — see [doc/anello_evk_reference.md](doc/anello_evk_reference.md) |
-| `remote_ip` | `192.168.1.111` | Device IP address (ethernet mode) |
+| `remote_ip` | `192.168.1.111` | Device IP address (ethernet mode). For full Ethernet setup — unit configuration with the ANELLO user tool, host networking, port mapping — see the [Ethernet Setup Guide](doc/ethernet_setup_guide.md) |
 | `local_data_port` | `1111` | Local UDP data port (ethernet mode) |
 | `local_config_port` | `2222` | Local UDP config port (ethernet mode) |
 | `local_odometer_port` | `3333` | Local UDP odometer port (ethernet mode) |
@@ -136,11 +141,39 @@ All parameters can be set via the launch file or on the command line.
 |-----------|---------|-------------|
 | `poll_interval_ms` | `5` | Main loop polling interval in milliseconds |
 
+#### Timestamping
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `timestamp_source` | `arrival` | `arrival` = host time captured at the port read. `mcu` = device MCU time translated to host time with a minimum-offset filter (Olson, IROS 2010): inter-message timing then follows the device clock instead of carrying serial/OS arrival jitter (sub-ms typical, multi-ms outliers). The translated stamps keep a small constant offset (≈ the minimum link latency); the raw `mcu_time`/`gps_time` fields remain in every `anello/*` message for offline use |
+
+Timestamping tips: at 230400 baud a full message spends 4–5 ms on the
+wire — prefer 921600 baud or UDP when stamp latency matters. With FTDI
+USB-serial adapters, lower the adapter's `latency_timer` from its 16 ms
+default (`/sys/bus/usb-serial/devices/*/latency_timer`) to 1 ms.
+
 #### Health Monitoring
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `heading_baseline` | `0.0` | Dual-antenna baseline length in meters, used to validate APHDG heading in the health monitor (`0.0` = skip the baseline check) |
+
+#### Standard IMU Output (REP-145)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `use_fog_wz` | `true` | Use the optical gyro (`OG_WZ`) for the z angular rate in `imu/data` and `imu/data_raw` instead of the MEMS `WZ`. Set `false` if the FOG is disabled on the unit (`APCFG fog off`) |
+| `flip_accel_sign` | `false` | Negate all `linear_acceleration` axes in `imu/data`/`imu/data_raw`. The device's at-rest accelerometer sign convention is not in the public manual — verify on the bench: stationary `linear_acceleration.z` must read **+9.8**; if it reads −9.8, set this `true` (see the [integration guide](doc/integration_guide.md)) |
+| `covariance.angular_velocity` | `[7.6e-7, 7.6e-7, 2.1e-8]` | Diagonal angular velocity covariance `[x, y, z]` in (rad/s)². Defaults derived from the ANELLO datasheet ARW specs at 100 Hz (MEMS X/Y: 0.3°/√hr; optical Z: 0.05°/√hr) |
+| `covariance.linear_acceleration` | `[2.5e-5, 2.5e-5, 2.5e-5]` | Diagonal linear acceleration covariance `[x, y, z]` in (m/s²)². Default derived from the 0.03 m/s/√hr VRW spec at 100 Hz |
+
+The defaults follow the standard white-noise model (per-sample variance =
+noise-density² × sample rate) at 100 Hz ODR; they scale linearly with ODR,
+so double them at 200 Hz or halve at 50 Hz. Datasheet noise densities are
+not conservative across all timescales (bias instability and temperature
+drift are excluded) — for tight fusion tuning, characterize the actual unit
+with an Allan-variance run (e.g. `allan_variance_ros`) and override these
+parameters.
 
 ### NTRIP Client Parameters
 
@@ -153,7 +186,14 @@ All parameters can be set via the launch file or on the command line.
 | `ntrip_username` | (empty) | NTRIP username |
 | `ntrip_password` | (empty) | NTRIP password |
 
-Additional NTRIP parameters (`ssl`, `cert`, `key`, `ca_cert`, `reconnect_attempt_max`, `reconnect_attempt_wait_seconds`, `rtcm_timeout_seconds`) can be passed directly to the `ntrip_client` node.
+Additional NTRIP parameters (`ssl`, `cert`, `key`, `ca_cert`, `reconnect_attempt_max`, `reconnect_attempt_wait_seconds`, `rtcm_timeout_seconds`, `ntrip_version`, `nmea_min_interval_seconds`) can be passed directly to the `ntrip_client` node.
+
+The client speaks NTRIP rev1 by default. Set `ntrip_version` to `Ntrip/2.0`
+for rev2 casters: the request is then sent as HTTP/1.1 with the required
+`Host` and `Ntrip-Version` headers, and chunked transfer encoding is
+decoded automatically. GGA sentences forwarded to the caster are
+rate-limited to one per `nmea_min_interval_seconds` (default 10 s, `0`
+disables the throttle), per standard NTRIP caster practice (5–60 s).
 
 ## Topics
 
@@ -178,8 +218,10 @@ All custom messages include a `std_msgs/Header` with timestamp and frame ID. Mes
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `imu/data` | `sensor_msgs/Imu` | Standard IMU message with orientation quaternion, angular velocity, linear acceleration, and covariance |
-| `gps/fix` | `sensor_msgs/NavSatFix` | Standard GNSS fix with position covariance |
+| `imu/data_raw` | `sensor_msgs/Imu` | Accelerometer + gyroscope at the sensor rate (every APIMU/APIM1), no orientation (`orientation_covariance[0] = -1` per REP-145) |
+| `imu/data` | `sensor_msgs/Imu` | Same as `imu/data_raw` plus the INS orientation quaternion, published at the INS rate |
+| `gps/fix` | `sensor_msgs/NavSatFix` | Raw GNSS fix from APGPS (4 Hz), covariance approximated from the receiver accuracy estimates. Feed this (not `ins/fix`) to `navsat_transform_node` — fusing the INS position back in would double-count the IMU |
+| `ins/fix` | `sensor_msgs/NavSatFix` | INS-fused position at the INS rate, with the full EKF covariance from APCOV when available |
 | `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA sentence forwarded to NTRIP caster |
 
 **Frame conventions:** the `anello/*` custom topics carry values in the

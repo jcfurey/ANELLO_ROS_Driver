@@ -23,6 +23,12 @@ troubleshooting.
 
 ## 1. Hardware Setup
 
+> **Using Ethernet as the primary data link?** (Recommended for robot
+> integrations — full 200 Hz rates, no USB-serial jitter.) Follow the
+> [Ethernet Setup Guide](ethernet_setup_guide.md) for unit configuration
+> with the ANELLO user tool, host networking, and driver launch, then
+> return here for TF, `robot_localization`, and Nav2 integration.
+
 ### 1.1 Connections
 
 The ANELLO EVK exposes two USB-serial ports when connected via USB:
@@ -157,6 +163,8 @@ Expected output:
 /anello/ins
 /gps/fix
 /imu/data
+/imu/data_raw
+/ins/fix
 ```
 
 ### 3.2 Inspect Data
@@ -174,6 +182,19 @@ ros2 topic echo /anello/ins --once
 # Health status
 ros2 topic echo /anello/health
 ```
+
+For the complete bench → static → drive acceptance sequence (including
+health-monitor, NTRIP, and fusion-topology checks), run the
+[Hardware Validation Checklist](hardware_validation_checklist.md).
+
+**Accelerometer sign check (do this once per setup):** with the vehicle
+stationary and level, `linear_acceleration.z` on `/imu/data` must read
+approximately **+9.8** (REP-145 convention: gravity reaction along +z in
+the FLU body frame). If it reads **-9.8**, the unit firmware reports
+acceleration with the opposite sign convention — set the driver parameter
+`flip_accel_sign:=true`. Getting this wrong inverts gravity for every
+downstream consumer (`robot_localization`, Madgwick/complementary
+filters), which typically shows up as immediate roll/pitch divergence.
 
 ### 3.3 Check Message Rates
 
@@ -212,7 +233,13 @@ You should see the status progress from 0 -> 1 -> 2 as the device
 initializes. With NTRIP corrections, it will reach 3 (RTK Float) and
 eventually 4 (RTK Fix). Values 8-10 mirror 0-2 but indicate GPS aiding
 is disabled. The driver maps these to `sensor_msgs/NavSatStatus` on
-`gps/fix`: 0/8 -> NO_FIX, 3/4 -> GBAS_FIX (RTK), all others -> FIX.
+`ins/fix`: 0/8 -> NO_FIX, 3/4 -> GBAS_FIX (RTK), all others -> FIX.
+
+`gps/fix` carries the raw (unfused) GNSS solution from APGPS instead:
+NO_FIX unless the receiver reports a 2D/3D fix, GBAS_FIX when RTK
+float/fixed. Use `gps/fix` for `navsat_transform_node` and other fusion
+inputs; use `ins/fix` when you want the device's own fused position
+with its full EKF covariance.
 
 
 ---
@@ -303,6 +330,24 @@ The `robot_localization` package (EKF/UKF) fuses IMU and GPS data into a
 smooth odometry estimate. The ANELLO driver publishes the standard message
 types that `robot_localization` expects.
 
+**Pick one topology.** The ANELLO unit already runs a coupled GNSS-INS
+EKF, so there are two supported ways to use it — don't mix them:
+
+1. **Trust the INS (simplest):** use `ins/fix` and the driver's
+   `odom -> ins_link` TF directly as your global estimate, with no second
+   EKF. Best when the ANELLO is your only localization sensor.
+2. **Re-fuse raw data (this section):** feed `imu/data` + `gps/fix` into
+   `ekf_node` + `navsat_transform_node`, as configured below. In this
+   topology do **not** also fuse `ins/fix`, and launch the driver with
+   `publish_tf:=false` — the INS-fused outputs carry the same IMU
+   information already, and fusing them again produces overconfident,
+   oscillating estimates while the driver's TF fights the EKF's
+   `odom -> base_link`.
+
+Keep `imu0_differential: false`: the ANELLO heading is an absolute,
+GNSS-true-north reference — differential mode would discard it and let
+yaw variance grow without bound.
+
 ### 5.1 Install
 
 ```bash
@@ -353,6 +398,10 @@ navsat_transform:
   ros__parameters:
     frequency: 30.0
     delay: 3.0
+    # Driver yaw is already ENU with 0 = east, referenced to TRUE north
+    # (GNSS-derived, not magnetic), so both corrections stay zero. Do not
+    # add UTM grid convergence here either - navsat_transform applies it
+    # internally.
     magnetic_declination_radians: 0.0
     yaw_offset: 0.0
     zero_altitude: false
