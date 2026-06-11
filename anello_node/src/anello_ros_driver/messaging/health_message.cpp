@@ -41,6 +41,21 @@
 #define HEADING_MISMATCH_COUNT_TH 4
 #endif
 
+// The ANELLO optical gyro range is 200 deg/s (vs 450 deg/s for the MEMS
+// gyro), so near that rate OG_WZ saturates while WZ still tracks. A
+// divergence there is a range limit, not a fault — suppress the
+// discrepancy check above this guard.
+#ifndef FOG_SATURATION_GUARD_DPS
+#define FOG_SATURATION_GUARD_DPS 180.0
+#endif
+
+// APHDG status flags (mirrors u-blox RELPOSNED): heading is only
+// meaningful when the GNSS fix is OK, the relative position is valid,
+// and the heading itself is flagged valid.
+#define HDG_FLAG_GNSS_FIX_OK (1 << 0)
+#define HDG_FLAG_REL_POS_VALID (1 << 2)
+#define HDG_FLAG_HEADING_VALID (1 << 8)
+
 health_message::health_message()
 {
     this->cur_imu_time = 0.0;
@@ -204,6 +219,15 @@ void health_message::add_gps_message(double *gps_msg)
 
 void health_message::add_hdg_message(double *hdg_msg)
 {
+    // Ignore epochs where the receiver itself marks the heading invalid;
+    // comparing INS heading against an invalid APHDG would accumulate
+    // spurious mismatch streaks.
+    uint16_t flags = static_cast<uint16_t>(hdg_msg[9]);
+    uint16_t required = HDG_FLAG_GNSS_FIX_OK | HDG_FLAG_REL_POS_VALID |
+                        HDG_FLAG_HEADING_VALID;
+    if ((flags & required) != required)
+        return;
+
     this->hdg_baseline = hdg_msg[5];
     this->hdg_heading = hdg_msg[6];
     this->hdg_heading_acc = hdg_msg[8];
@@ -261,6 +285,13 @@ bool health_message::has_gyro_discrepancy() const
     // if moving average not ready yet, return false
     if (this->buffer_full)
     {
+        // Above the optical gyro's range the channels legitimately diverge
+        // (OG_WZ rails while the MEMS keeps tracking) — not a fault.
+        if (fabs(this->wz_mems_moving_average) > FOG_SATURATION_GUARD_DPS)
+        {
+            return false;
+        }
+
         double diff = fabs(this->wz_mems_moving_average - this->wz_fog_moving_average);
         if (diff > GYRO_DISCREPANCY_THRESHOLD)
         {

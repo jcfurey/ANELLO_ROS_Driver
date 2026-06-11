@@ -150,6 +150,14 @@ All parameters can be set via the launch file or on the command line.
 | `covariance.angular_velocity` | `[7.6e-7, 7.6e-7, 2.1e-8]` | Diagonal angular velocity covariance `[x, y, z]` in (rad/s)². Defaults derived from the ANELLO datasheet ARW specs at 100 Hz (MEMS X/Y: 0.3°/√hr; optical Z: 0.05°/√hr) |
 | `covariance.linear_acceleration` | `[2.5e-5, 2.5e-5, 2.5e-5]` | Diagonal linear acceleration covariance `[x, y, z]` in (m/s²)². Default derived from the 0.03 m/s/√hr VRW spec at 100 Hz |
 
+The defaults follow the standard white-noise model (per-sample variance =
+noise-density² × sample rate) at 100 Hz ODR; they scale linearly with ODR,
+so double them at 200 Hz or halve at 50 Hz. Datasheet noise densities are
+not conservative across all timescales (bias instability and temperature
+drift are excluded) — for tight fusion tuning, characterize the actual unit
+with an Allan-variance run (e.g. `allan_variance_ros`) and override these
+parameters.
+
 ### NTRIP Client Parameters
 
 | Parameter | Default | Description |
@@ -195,7 +203,8 @@ All custom messages include a `std_msgs/Header` with timestamp and frame ID. Mes
 |-------|------|-------------|
 | `imu/data_raw` | `sensor_msgs/Imu` | Accelerometer + gyroscope at the sensor rate (every APIMU/APIM1), no orientation (`orientation_covariance[0] = -1` per REP-145) |
 | `imu/data` | `sensor_msgs/Imu` | Same as `imu/data_raw` plus the INS orientation quaternion, published at the INS rate |
-| `gps/fix` | `sensor_msgs/NavSatFix` | Standard GNSS fix with position covariance |
+| `gps/fix` | `sensor_msgs/NavSatFix` | Raw GNSS fix from APGPS (4 Hz), covariance approximated from the receiver accuracy estimates. Feed this (not `ins/fix`) to `navsat_transform_node` — fusing the INS position back in would double-count the IMU |
+| `ins/fix` | `sensor_msgs/NavSatFix` | INS-fused position at the INS rate, with the full EKF covariance from APCOV when available |
 | `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA sentence forwarded to NTRIP caster |
 
 **Frame conventions:** the `anello/*` custom topics carry values in the

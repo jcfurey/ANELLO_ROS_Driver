@@ -157,6 +157,8 @@ Expected output:
 /anello/ins
 /gps/fix
 /imu/data
+/imu/data_raw
+/ins/fix
 ```
 
 ### 3.2 Inspect Data
@@ -212,7 +214,13 @@ You should see the status progress from 0 -> 1 -> 2 as the device
 initializes. With NTRIP corrections, it will reach 3 (RTK Float) and
 eventually 4 (RTK Fix). Values 8-10 mirror 0-2 but indicate GPS aiding
 is disabled. The driver maps these to `sensor_msgs/NavSatStatus` on
-`gps/fix`: 0/8 -> NO_FIX, 3/4 -> GBAS_FIX (RTK), all others -> FIX.
+`ins/fix`: 0/8 -> NO_FIX, 3/4 -> GBAS_FIX (RTK), all others -> FIX.
+
+`gps/fix` carries the raw (unfused) GNSS solution from APGPS instead:
+NO_FIX unless the receiver reports a 2D/3D fix, GBAS_FIX when RTK
+float/fixed. Use `gps/fix` for `navsat_transform_node` and other fusion
+inputs; use `ins/fix` when you want the device's own fused position
+with its full EKF covariance.
 
 
 ---

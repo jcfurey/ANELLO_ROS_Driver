@@ -298,6 +298,7 @@ private:
         pub_ros_imu_ = create_publisher<sensor_msgs::msg::Imu>("imu/data", sensor_qos);
         pub_ros_imu_raw_ = create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", sensor_qos);
         pub_navfix_ = create_publisher<sensor_msgs::msg::NavSatFix>("gps/fix", sensor_qos);
+        pub_ins_fix_ = create_publisher<sensor_msgs::msg::NavSatFix>("ins/fix", sensor_qos);
     }
 
     // ── Subscribers ────────────────────────────────────────────────────
@@ -517,6 +518,7 @@ private:
                     decode_ascii_gps(val, decoded_val);
                     publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
                     publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
+                    publish_navsat_from_gps(decoded_val, stamp);
                     health_msg_.add_gps_message(decoded_val);
                     is_ok = true;
                 }
@@ -616,6 +618,7 @@ private:
             if (GPS1 == ant_id) {
                 publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
                 publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
+                publish_navsat_from_gps(decoded_val, stamp);
                 health_msg_.add_gps_message(decoded_val);
             } else {
                 publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);
@@ -717,6 +720,19 @@ private:
     {
         cov_received_ = true;
 
+        // APCOV position units are undocumented; all surveyed vendors emit
+        // m². A metre-level m² variance is >= ~1e-6; the same uncertainty
+        // in deg² would be ~1e-10 (1 m =~ 9e-6 deg of latitude), so the two
+        // interpretations are ~10 orders of magnitude apart. Warn once if
+        // the values look deg²-scaled.
+        if (!cov_scale_warned_ && val[1] > 0.0 && val[1] < 1.0e-8) {
+            cov_scale_warned_ = true;
+            RCLCPP_WARN(get_logger(),
+                "APCOV lat-lat covariance %.3e is suspiciously small for "
+                "m^2 — if the firmware reports deg^2, the NavSatFix "
+                "position covariance on ins/fix is misscaled", val[1]);
+        }
+
         // Orientation covariance (deg^2) indices 13-18
         cov_cache_.orient[0] = val[13]; // roll-roll
         cov_cache_.orient[1] = val[16]; // roll-pitch
@@ -763,10 +779,12 @@ private:
 
         pub_ros_imu_->publish(imu_msg);
 
-        // ── sensor_msgs/NavSatFix ──
+        // ── sensor_msgs/NavSatFix (INS-fused position on ins/fix) ──
+        // The raw GNSS solution goes out on gps/fix from the APGPS branch;
+        // this fused solution carries the INS EKF covariance from APCOV.
         auto nav = sensor_msgs::msg::NavSatFix();
         nav.header.stamp = stamp;
-        nav.header.frame_id = frame_gnss_;
+        nav.header.frame_id = frame_ins_;
 
         // APINS status: 0/8 = attitude only (8-10 are GPS-disabled variants),
         // 1/2/9/10 = position valid, 3/4 = RTK float/fix.
@@ -787,7 +805,13 @@ private:
         nav.longitude = ins[4];
         nav.altitude  = ins[5];
 
-        // ENU covariance: [lon,lat,alt] -> [ee,en,eu; ne,nn,nu; ue,un,uu]
+        // ENU covariance: [lon,lat,alt] -> [ee,en,eu; ne,nn,nu; ue,un,uu].
+        // APCOV units are not in the public manual; surveyed vendor practice
+        // (u-blox NAV-COV, NovAtel INSPVAX, Septentrio, NMEA GST) is m² in a
+        // local-level frame, and the covAltAlt naming (vs the explicitly-down
+        // covVd) indicates an up-positive altitude axis, so values pass
+        // through unconverted. store_last_cov() warns if the magnitudes
+        // look deg²-scaled.
         nav.position_covariance[0] = cov_cache_.pos[4]; // lon-lon
         nav.position_covariance[1] = cov_cache_.pos[1]; // lat-lon
         nav.position_covariance[2] = cov_cache_.pos[5]; // lon-alt
@@ -800,6 +824,49 @@ private:
         nav.position_covariance_type = cov_received_
             ? sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN
             : sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+
+        pub_ins_fix_->publish(nav);
+    }
+
+    // Raw GNSS solution on gps/fix: REP-145 consumers (notably
+    // robot_localization's navsat_transform_node) expect an unfused GNSS
+    // fix here — republishing the INS position would feed the IMU back
+    // into the fusion. Covariance is approximated from the receiver's
+    // horizontal/vertical accuracy estimates, as in the u-blox and NMEA
+    // ROS drivers.
+    void publish_navsat_from_gps(const double gps[], rclcpp::Time stamp)
+    {
+        auto nav = sensor_msgs::msg::NavSatFix();
+        nav.header.stamp = stamp;
+        nav.header.frame_id = frame_gnss_;
+
+        // APGPS FixType {0 none, 2 2D, 3 3D, 5 time-only};
+        // RTK status {0 SPP, 1 float, 2 fixed}.
+        const int fix_type = static_cast<int>(gps[11]);
+        const int rtk = static_cast<int>(gps[15]);
+        if (fix_type != 2 && fix_type != 3)
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+        else if (rtk == 1 || rtk == 2)
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX;
+        else
+            nav.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+        nav.status.service =
+            sensor_msgs::msg::NavSatStatus::SERVICE_GPS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_GLONASS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_COMPASS |
+            sensor_msgs::msg::NavSatStatus::SERVICE_GALILEO;
+
+        nav.latitude  = gps[2];
+        nav.longitude = gps[3];
+        nav.altitude  = gps[4];
+
+        const double hacc = gps[8];
+        const double vacc = gps[9];
+        nav.position_covariance[0] = hacc * hacc;
+        nav.position_covariance[4] = hacc * hacc;
+        nav.position_covariance[8] = vacc * vacc;
+        nav.position_covariance_type =
+            sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
 
         pub_navfix_->publish(nav);
     }
@@ -825,6 +892,7 @@ private:
     ros_imu_pub_t pub_ros_imu_;
     ros_imu_pub_t pub_ros_imu_raw_;
     navfix_pub_t pub_navfix_;
+    navfix_pub_t pub_ins_fix_;
 
     // Subscribers
     rclcpp::Subscription<rtcm_msgs::msg::Message>::SharedPtr sub_rtcm_;
@@ -859,6 +927,7 @@ private:
     ImuCache imu_cache_;
     CovCache cov_cache_;
     bool cov_received_ = false;
+    bool cov_scale_warned_ = false;
 };
 
 } // namespace anello
