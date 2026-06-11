@@ -1,5 +1,10 @@
 name: CI
 
+# Actions are force-migrated from Node 20 to Node 24 on 2026-06-16;
+# opt in early so any breakage shows up before the deadline.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     branches: [main, ros2_develop]
