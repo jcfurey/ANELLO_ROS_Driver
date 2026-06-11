@@ -320,6 +320,24 @@ The `robot_localization` package (EKF/UKF) fuses IMU and GPS data into a
 smooth odometry estimate. The ANELLO driver publishes the standard message
 types that `robot_localization` expects.
 
+**Pick one topology.** The ANELLO unit already runs a coupled GNSS-INS
+EKF, so there are two supported ways to use it — don't mix them:
+
+1. **Trust the INS (simplest):** use `ins/fix` and the driver's
+   `odom -> ins_link` TF directly as your global estimate, with no second
+   EKF. Best when the ANELLO is your only localization sensor.
+2. **Re-fuse raw data (this section):** feed `imu/data` + `gps/fix` into
+   `ekf_node` + `navsat_transform_node`, as configured below. In this
+   topology do **not** also fuse `ins/fix`, and launch the driver with
+   `publish_tf:=false` — the INS-fused outputs carry the same IMU
+   information already, and fusing them again produces overconfident,
+   oscillating estimates while the driver's TF fights the EKF's
+   `odom -> base_link`.
+
+Keep `imu0_differential: false`: the ANELLO heading is an absolute,
+GNSS-true-north reference — differential mode would discard it and let
+yaw variance grow without bound.
+
 ### 5.1 Install
 
 ```bash
@@ -370,6 +388,10 @@ navsat_transform:
   ros__parameters:
     frequency: 30.0
     delay: 3.0
+    # Driver yaw is already ENU with 0 = east, referenced to TRUE north
+    # (GNSS-derived, not magnetic), so both corrections stay zero. Do not
+    # add UTM grid convergence here either - navsat_transform applies it
+    # internally.
     magnetic_declination_radians: 0.0
     yaw_offset: 0.0
     zero_altitude: false

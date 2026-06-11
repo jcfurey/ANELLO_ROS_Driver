@@ -874,13 +874,22 @@ private:
         nav.longitude = gps[3];
         nav.altitude  = gps[4];
 
+        // navsat_transform copies this covariance verbatim into the EKF
+        // measurement noise, and robot_localization replaces zeros with a
+        // 1e-6 epsilon (wildly overtrusting the fix) — so claim
+        // DIAGONAL_KNOWN only when the receiver reports real accuracies.
         const double hacc = gps[8];
         const double vacc = gps[9];
-        nav.position_covariance[0] = hacc * hacc;
-        nav.position_covariance[4] = hacc * hacc;
-        nav.position_covariance[8] = vacc * vacc;
-        nav.position_covariance_type =
-            sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
+        if (hacc > 0.0 && vacc > 0.0) {
+            nav.position_covariance[0] = hacc * hacc;
+            nav.position_covariance[4] = hacc * hacc;
+            nav.position_covariance[8] = vacc * vacc;
+            nav.position_covariance_type =
+                sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
+        } else {
+            nav.position_covariance_type =
+                sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+        }
 
         pub_navfix_->publish(nav);
     }
