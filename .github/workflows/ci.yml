@@ -25,14 +25,24 @@ jobs:
     container:
       image: ros:${{ matrix.distro }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
           apt-get update
           rosdep update --rosdistro ${{ matrix.distro }}
+          # The lint test dependencies intermittently drop out of the
+          # rolling rosdep index for older Ubuntu bases; resolve them
+          # via apt directly and let rosdep handle the rest.
           rosdep install --from-paths . --ignore-src -y \
-            --rosdistro ${{ matrix.distro }}
+            --rosdistro ${{ matrix.distro }} \
+            --skip-keys "ament_lint_common ament_lint_auto ament_pep257 ament_copyright ament_flake8"
+          apt-get install -y \
+            ros-${{ matrix.distro }}-ament-lint-common \
+            ros-${{ matrix.distro }}-ament-lint-auto \
+            ros-${{ matrix.distro }}-ament-pep257 \
+            ros-${{ matrix.distro }}-ament-copyright \
+            ros-${{ matrix.distro }}-ament-flake8
 
       - name: Build
         shell: bash
@@ -51,7 +61,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: test-results-${{ matrix.distro }}
           path: build/*/test_results/**/*.xml

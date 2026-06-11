@@ -15,6 +15,7 @@ from ntrip_client.ntrip_client import NTRIPClient
 
 
 class NTRIPRos(Node):
+
     def __init__(self):
         super().__init__('ntrip_client')
 
