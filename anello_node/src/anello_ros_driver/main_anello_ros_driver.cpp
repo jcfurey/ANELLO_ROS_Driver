@@ -110,6 +110,58 @@ struct ReadBuffer
     int n_used = 0;
     int nbytes = 0;
     char buff[MAX_BUF_LEN] = {};
+    rclcpp::Time stamp;  // host time captured at the port read
+};
+
+/* One-way device->host clock translator (Olson, IROS 2010 "A passive
+ * solution to the sensor synchronization problem"): transport latency
+ * only ever adds to arrival time, so the true clock offset is bounded
+ * by the minimum observed (arrival - device) delta. Tracking that
+ * minimum and letting it creep upward by a bounded drift rate gives
+ * stamps whose dt follows the device clock, free of serial/OS jitter,
+ * and provably never worse than arrival stamping. */
+class ClockTranslator
+{
+public:
+    void update(double device_s, double arrival_s)
+    {
+        if (have_last_ && device_s + 1e-6 < last_device_s_)
+        {
+            reset();  // device time went backwards: unit rebooted
+        }
+        if (have_last_ && n_samples_ > 0)
+        {
+            // Absorb relative oscillator drift (bounded at 200 ppm)
+            min_offset_ += kDriftBound * (device_s - last_device_s_);
+        }
+        const double offset = arrival_s - device_s;
+        if (n_samples_ == 0 || offset < min_offset_)
+        {
+            min_offset_ = offset;
+        }
+        last_device_s_ = device_s;
+        have_last_ = true;
+        if (n_samples_ < kWarmupSamples)
+        {
+            n_samples_++;
+        }
+    }
+    bool ready() const { return n_samples_ >= kWarmupSamples; }
+    double translate(double device_s) const { return device_s + min_offset_; }
+    void reset()
+    {
+        n_samples_ = 0;
+        have_last_ = false;
+        min_offset_ = 0.0;
+    }
+
+private:
+    static constexpr double kDriftBound = 200e-6;
+    static constexpr int kWarmupSamples = 100;
+    double min_offset_ = 0.0;
+    double last_device_s_ = 0.0;
+    bool have_last_ = false;
+    int n_samples_ = 0;
 };
 
 
@@ -178,6 +230,12 @@ private:
         declare_parameter("poll_interval_ms", 5,
             d("Main loop polling interval in milliseconds"));
 
+        declare_parameter("timestamp_source", "arrival",
+            d("Header stamp source: 'arrival' = host time at the port "
+              "read (default); 'mcu' = device MCU time translated to host "
+              "time with a minimum-offset filter, eliminating serial/OS "
+              "arrival jitter from inter-message timing"));
+
         declare_parameter("heading_baseline", 0.0,
             d("Dual-antenna baseline length in meters, used to validate the "
               "APHDG heading in the health monitor (0.0 = skip the check)"));
@@ -239,6 +297,15 @@ private:
         health_msg_.set_baseline(get_parameter("heading_baseline").as_double());
         use_fog_wz_ = get_parameter("use_fog_wz").as_bool();
         flip_accel_sign_ = get_parameter("flip_accel_sign").as_bool();
+
+        timestamp_source_ = get_parameter("timestamp_source").as_string();
+        if (timestamp_source_ != "arrival" && timestamp_source_ != "mcu") {
+            RCLCPP_WARN(get_logger(),
+                "Unknown timestamp_source '%s' — falling back to 'arrival'",
+                timestamp_source_.c_str());
+            timestamp_source_ = "arrival";
+        }
+        use_mcu_stamp_ = (timestamp_source_ == "mcu");
 
         auto read_cov3 = [this](const char *name, double out[3]) {
             auto v = get_parameter(name).as_double_array();
@@ -490,6 +557,9 @@ private:
                 read_buf_.n_used = 0;
                 if (read_buf_.nbytes <= 0)
                     break;
+                // Arrival time captured at the read, not at parse —
+                // messages decoded later from this buffer share it.
+                read_buf_.stamp = now();
             }
             process_read_buffer();
         }
@@ -524,11 +594,10 @@ private:
                     num = 0;
                 }
 
-                auto stamp = now();
-
                 if (num >= 17 && strstr(val[0], "APGPS") != nullptr)
                 {
                     decode_ascii_gps(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
                     publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
                     publish_navsat_from_gps(decoded_val, stamp);
@@ -538,12 +607,14 @@ private:
                 else if (num >= 17 && strstr(val[0], "APGP2") != nullptr)
                 {
                     decode_ascii_gps(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);
                     is_ok = true;
                 }
                 else if (num >= 12 && strstr(val[0], "APHDG") != nullptr)
                 {
                     decode_ascii_hdr(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
                     health_msg_.add_hdg_message(decoded_val);
                     is_ok = true;
@@ -551,6 +622,7 @@ private:
                 else if (num >= 12 && strstr(val[0], "APIMU") != nullptr)
                 {
                     decode_ascii_imu(val, num, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
                     publish_ros_imu_raw(decoded_val, stamp);
                     health_msg_.add_imu_message(decoded_val);
@@ -560,6 +632,7 @@ private:
                 else if (num >= 11 && strstr(val[0], "APIM1") != nullptr)
                 {
                     decode_ascii_im1(val, num, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
                     publish_ros_imu_raw(decoded_val, stamp);
                     is_ok = true;
@@ -567,6 +640,7 @@ private:
                 else if (num >= 20 && strstr(val[0], "APCOV") != nullptr)
                 {
                     decode_ascii_cov(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
                     store_last_cov(decoded_val);
                     is_ok = true;
@@ -574,6 +648,7 @@ private:
                 else if (num >= 14 && strstr(val[0], "APINS") != nullptr)
                 {
                     decode_ascii_ins(val, decoded_val);
+                    auto stamp = stamp_from_mcu(decoded_val[0]);
                     publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
                     health_msg_.add_ins_message(decoded_val);
                     publish_ros_imu_and_nav(decoded_val, stamp);
@@ -596,6 +671,26 @@ private:
     }
 
 
+    // Stamp for a decoded message whose first field is the device MCU
+    // time in ms. In 'mcu' mode the translator is fed every message
+    // (the highest-rate stream keeps it tight) and used once warmed up.
+    rclcpp::Time stamp_from_mcu(double mcu_ms)
+    {
+        if (use_mcu_stamp_)
+        {
+            const double device_s = mcu_ms * 1e-3;
+            clock_translator_.update(device_s, read_buf_.stamp.seconds());
+            if (clock_translator_.ready())
+            {
+                return rclcpp::Time(
+                    static_cast<int64_t>(
+                        clock_translator_.translate(device_s) * 1e9),
+                    read_buf_.stamp.get_clock_type());
+            }
+        }
+        return read_buf_.stamp;
+    }
+
     // ── RTCM handler ──────────────────────────────────────────────────
 
     // The decoders memcpy a fixed-size packed struct from the payload at
@@ -611,13 +706,16 @@ private:
         if (a1buff_.type != 4058 || a1buff_.crc)
             return false;
 
-        auto stamp = now();
+        // All subtypes carry the device MCU time as decoded_val[0] (ms),
+        // so the stamp is computed after each decode.
+        rclcpp::Time stamp;
 
         switch (a1buff_.subtype) {
         case 1: // IMU
             if (!rtcm_payload_covers(sizeof(rtcm_old_apimu_t)))
                 return false;
             decode_rtcm_imu_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
             publish_ros_imu_raw(decoded_val, stamp);
             health_msg_.add_imu_message(decoded_val);
@@ -628,6 +726,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apgps_t)))
                 return false;
             int ant_id = decode_rtcm_gps_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             if (GPS1 == ant_id) {
                 publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
                 publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
@@ -643,6 +742,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_aphdr_t)))
                 return false;
             decode_rtcm_hdg_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
             health_msg_.add_hdg_message(decoded_val);
             return true;
@@ -651,6 +751,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apins_t)))
                 return false;
             decode_rtcm_ins_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
             health_msg_.add_ins_message(decoded_val);
             publish_ros_imu_and_nav(decoded_val, stamp);
@@ -661,6 +762,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apim1_t)))
                 return false;
             decode_rtcm_im1_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
             publish_ros_imu_raw(decoded_val, stamp);
             return true;
@@ -669,6 +771,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apcov_t)))
                 return false;
             decode_rtcm_cov_msg(decoded_val, a1buff_);
+            stamp = stamp_from_mcu(decoded_val[0]);
             publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
             store_last_cov(decoded_val);
             return true;
@@ -943,6 +1046,9 @@ private:
     bool flip_accel_sign_ = false;
     double ang_vel_cov_[3] = {};
     double lin_acc_cov_[3] = {};
+    std::string timestamp_source_ = "arrival";
+    bool use_mcu_stamp_ = false;
+    ClockTranslator clock_translator_;
 
     // Decode state
     ReadBuffer read_buf_;

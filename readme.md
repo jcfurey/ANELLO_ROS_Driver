@@ -136,6 +136,17 @@ All parameters can be set via the launch file or on the command line.
 |-----------|---------|-------------|
 | `poll_interval_ms` | `5` | Main loop polling interval in milliseconds |
 
+#### Timestamping
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `timestamp_source` | `arrival` | `arrival` = host time captured at the port read. `mcu` = device MCU time translated to host time with a minimum-offset filter (Olson, IROS 2010): inter-message timing then follows the device clock instead of carrying serial/OS arrival jitter (sub-ms typical, multi-ms outliers). The translated stamps keep a small constant offset (≈ the minimum link latency); the raw `mcu_time`/`gps_time` fields remain in every `anello/*` message for offline use |
+
+Timestamping tips: at 230400 baud a full message spends 4–5 ms on the
+wire — prefer 921600 baud or UDP when stamp latency matters. With FTDI
+USB-serial adapters, lower the adapter's `latency_timer` from its 16 ms
+default (`/sys/bus/usb-serial/devices/*/latency_timer`) to 1 ms.
+
 #### Health Monitoring
 
 | Parameter | Default | Description |
