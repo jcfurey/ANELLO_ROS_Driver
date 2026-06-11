@@ -1,0 +1,59 @@
+name: CI
+
+# Actions are force-migrated from Node 20 to Node 24 on 2026-06-16;
+# opt in early so any breakage shows up before the deadline.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    branches: [main, ros2_develop]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ROS2 ${{ matrix.distro }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Rolling is omitted: its rosdistro entries have moved past the
+        # Ubuntu base of the official ros:rolling container, so no
+        # dependency keys (incl. std_msgs) resolve there. Re-add it once
+        # ros:rolling ships on the new base.
+        distro: [jazzy, kilted]
+    container:
+      image: ros:${{ matrix.distro }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          rosdep update --rosdistro ${{ matrix.distro }}
+          rosdep install --from-paths . --ignore-src -y \
+            --rosdistro ${{ matrix.distro }}
+
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/${{ matrix.distro }}/setup.bash
+          colcon build --event-handlers console_cohesion+ \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+      - name: Test
+        shell: bash
+        run: |
+          source /opt/ros/${{ matrix.distro }}/setup.bash
+          source install/setup.bash
+          colcon test --event-handlers console_cohesion+
+          colcon test-result --verbose
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: test-results-${{ matrix.distro }}
+          path: build/*/test_results/**/*.xml
+          if-no-files-found: ignore
