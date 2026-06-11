@@ -88,9 +88,15 @@ void publish_gga(double *gps, gga_pub_t pub, rclcpp::Time time, const std::strin
                   << ",";
     gngga_message << lon_hemisphere << ",";
 
+    // GGA fix quality: 0 = invalid, 1 = GPS fix, 4 = RTK fixed, 5 = RTK float.
+    // APGPS FixType is {0 none, 2 2D, 3 3D, 5 time-only}: only 2D/3D fixes
+    // carry a valid position, regardless of the RTK status field.
     int value_map[3] = {1, 5, 4};
+    int fix_type = static_cast<int>(gps[11]);
     int rtk_fix_quality = static_cast<int>(gps[15]);
-    if (rtk_fix_quality >= 0 && rtk_fix_quality < 3)
+    if (fix_type != 2 && fix_type != 3)
+        gngga_message << "0,";
+    else if (rtk_fix_quality >= 0 && rtk_fix_quality < 3)
         gngga_message << value_map[rtk_fix_quality] << ",";
     else
         gngga_message << "0,";
@@ -217,6 +223,7 @@ void publish_imu(double *imu, imu_pub_t pub, rclcpp::Time stamp, const std::stri
     msg.odometer_speed = imu[8];
     msg.odometer_time = imu[9];
     msg.temp = imu[10];
+    msg.t_sync = imu[11];
 
     pub->publish(msg);
 }

@@ -1,6 +1,9 @@
 std_msgs/Header header
 
 float64 mcu_time
+# External-sync timestamp in ms (firmware >= v1.0.39; 0.0 when sync is
+# disabled or the firmware does not output the field)
+float64 t_sync
 float64 ax
 float64 ay
 float64 az

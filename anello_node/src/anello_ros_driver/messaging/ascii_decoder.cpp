@@ -99,13 +99,15 @@ int decode_ascii_imu(char *val[], int field_num, double *output_val)
 int decode_ascii_im1(char *val[], int field_num, double *output_val)
 {
     /*
-    #APIMU,318214.937,0.0344,-0.0128,1.0077,-0.0817,0.0013,-0.0038,0.01051,47.0547*55
+    #APIM1,318214.937,0.0,0.0344,-0.0128,1.0077,-0.0817,0.0013,-0.0038,0.01051,47.0547*55
     */
-    (void)field_num;
-    int loc = 2;
-    
+    /* Firmware before v1.0.39 does not output the T_Sync field, dropping the
+       message from 13 parsed fields to 12 — detect by field count like APIMU. */
+    bool b_tsync_detected = (field_num == 13);
+    int loc = b_tsync_detected ? 3 : 2;
+
     output_val[0] = atof(val[1]);
-    output_val[9] = atof(val[loc++]);          /* T_Sync */
+    output_val[9] = (b_tsync_detected) ? atof(val[2]) : 0.0; /* T_Sync */
     output_val[1] = atof(val[loc++]);          /* fx */
     output_val[2] = atof(val[loc++]);          /* fy */
     output_val[3] = atof(val[loc++]);          /* fz */
@@ -120,7 +122,7 @@ int decode_ascii_im1(char *val[], int field_num, double *output_val)
 
 int decode_ascii_ins(char *val[], double *output_val)
 {
-    /* time[s], lat[radian], lon[radian], ht[m], vn[m / s], ve[m / s], vd[m / s], roll[deg], pitch[deg], yaw[deg] */
+    /* time[ms], gps_time[ns], status, lat[deg], lon[deg], ht[m], vn[m/s], ve[m/s], vd[m/s], roll[deg], pitch[deg], heading[deg], zupt */
     /*
     #APINS,318215,1343773580502990592,1,37.398875500000,-121.979132700000,-27.965002059937,,,,-0.166232,1.773182,0.250746,1*74
     */
