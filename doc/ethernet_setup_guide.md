@@ -251,6 +251,10 @@ The short version:
 
 ## 9. Verification
 
+These are the link-level basics; for the full bench → static → drive
+acceptance sequence, run the
+[Hardware Validation Checklist](hardware_validation_checklist.md).
+
 ```bash
 # All topics alive
 ros2 topic list | grep -E "anello|imu|gps|ins"

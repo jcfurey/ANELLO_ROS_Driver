@@ -183,6 +183,10 @@ ros2 topic echo /anello/ins --once
 ros2 topic echo /anello/health
 ```
 
+For the complete bench → static → drive acceptance sequence (including
+health-monitor, NTRIP, and fusion-topology checks), run the
+[Hardware Validation Checklist](hardware_validation_checklist.md).
+
 **Accelerometer sign check (do this once per setup):** with the vehicle
 stationary and level, `linear_acceleration.z` on `/imu/data` must read
 approximately **+9.8** (REP-145 convention: gravity reaction along +z in
