@@ -73,6 +73,16 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   set(ament_cmake_uncrustify_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_anello_decoding
+    test/test_bit_tools.cpp
+    test/test_ascii_decoder.cpp
+    test/test_rtcm_decoder.cpp
+    test/test_health_message.cpp
+    test/test_clock_translator.cpp
+  )
+  target_link_libraries(test_anello_decoding anello_ros_driver_component)
 endif()
 
 ament_package()

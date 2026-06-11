@@ -1,5 +1,7 @@
 # ANELLO ROS2 Driver
 
+[![CI](https://github.com/jcfurey/ANELLO_ROS_Driver/actions/workflows/ci.yml/badge.svg)](https://github.com/jcfurey/ANELLO_ROS_Driver/actions/workflows/ci.yml)
+
 ROS2 driver for [ANELLO Photonics](https://www.anellophotonics.com/) GNSS/INS devices.
 
 **New to ANELLO?** See the [Integration Guide](doc/integration_guide.md) for
