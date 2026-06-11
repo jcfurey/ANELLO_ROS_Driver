@@ -142,9 +142,10 @@ class NTRIPClient:
                 self._raw_socket, server_hostname=self._host
             )
 
-        # Send the HTTP Request
+        # Send the HTTP Request (sendall: a partial send() would
+        # truncate the request and corrupt the caster session)
         try:
-            self._server_socket.send(self._form_request())
+            self._server_socket.sendall(self._form_request())
         except Exception as e:
             self._logerr(
                 'Unable to send request to server at '
@@ -277,18 +278,13 @@ class NTRIPClient:
                 self._reconnect_attempt_count += 1
                 self.disconnect()
                 connect_success = self.connect()
+                # Success must be checked before the attempt limit:
+                # otherwise a reconnect that succeeds on the final
+                # allowed attempt still raised "never succeeded".
+                if connect_success:
+                    self._reconnect_attempt_count = 0
+                    break
                 if (
-                    not connect_success
-                    and self._reconnect_attempt_count
-                    < self.reconnect_attempt_max
-                ):
-                    self._logerr(
-                        'Reconnect to http://{}:{} failed. '
-                        'Retrying in {} seconds'.format(
-                            self._host, self._port,
-                            self.reconnect_attempt_wait_seconds))
-                    time.sleep(self.reconnect_attempt_wait_seconds)
-                elif (
                     self._reconnect_attempt_count
                     >= self.reconnect_attempt_max
                 ):
@@ -297,9 +293,12 @@ class NTRIPClient:
                     raise Exception(
                         "Reconnect was attempted {} times, but "
                         "never succeeded".format(attempts))
-                elif connect_success:
-                    self._reconnect_attempt_count = 0
-                    break
+                self._logerr(
+                    'Reconnect to http://{}:{} failed. '
+                    'Retrying in {} seconds'.format(
+                        self._host, self._port,
+                        self.reconnect_attempt_wait_seconds))
+                time.sleep(self.reconnect_attempt_wait_seconds)
         else:
             self._logdebug(
                 'Reconnect called while not connected, ignoring')
@@ -327,7 +326,7 @@ class NTRIPClient:
 
         # Encode the data and send it to the socket
         try:
-            self._server_socket.send(sentence.encode('utf-8'))
+            self._server_socket.sendall(sentence.encode('utf-8'))
         except Exception as e:
             self._logwarn('Unable to send NMEA sentence to server.')
             self._logwarn('Exception: {}'.format(str(e)))
@@ -371,10 +370,7 @@ class NTRIPClient:
         self._pending_stream_data = b''
 
         # Check if there is any data available on the socket
-        read_sockets, _, _ = select.select(
-            [self._server_socket], [], [], 0
-        )
-        if not read_sockets:
+        if not self._data_available():
             if pending:
                 if self._response_chunked:
                     pending = self._dechunk(pending)
@@ -394,8 +390,7 @@ class NTRIPClient:
                 data += chunk
                 if len(chunk) < _CHUNK_SIZE:
                     break
-                ready, _, _ = select.select([self._server_socket], [], [], 0)
-                if not ready:
+                if not self._data_available():
                     break
             except Exception:
                 self._logerr(
@@ -475,6 +470,18 @@ class NTRIPClient:
             payload += self._chunk_buffer[size_end + 2:size_end + 2 + chunk_size]
             self._chunk_buffer = self._chunk_buffer[chunk_end:]
         return payload
+
+    def _data_available(self):
+        # select() only sees the raw fd. With TLS a single record can
+        # decrypt to more than one recv() worth of bytes; the remainder
+        # sits in the SSLSocket's internal buffer, invisible to select,
+        # and would otherwise be stranded until the next TCP segment.
+        if self.ssl and self._server_socket.pending() > 0:
+            return True
+        read_sockets, _, _ = select.select(
+            [self._server_socket], [], [], 0
+        )
+        return bool(read_sockets)
 
     def shutdown(self):
         # Set some state, and then disconnect
