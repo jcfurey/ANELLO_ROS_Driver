@@ -10,18 +10,14 @@ jobs:
   build-and-test:
     name: ROS2 ${{ matrix.distro }}
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - distro: jazzy
-            experimental: false
-          - distro: kilted
-            experimental: false
-          # Rolling tracks the next release; failures are advisory.
-          - distro: rolling
-            experimental: true
+        # Rolling is omitted: its rosdistro entries have moved past the
+        # Ubuntu base of the official ros:rolling container, so no
+        # dependency keys (incl. std_msgs) resolve there. Re-add it once
+        # ros:rolling ships on the new base.
+        distro: [jazzy, kilted]
     container:
       image: ros:${{ matrix.distro }}
     steps:
@@ -31,18 +27,8 @@ jobs:
         run: |
           apt-get update
           rosdep update --rosdistro ${{ matrix.distro }}
-          # The lint test dependencies intermittently drop out of the
-          # rolling rosdep index for older Ubuntu bases; resolve them
-          # via apt directly and let rosdep handle the rest.
           rosdep install --from-paths . --ignore-src -y \
-            --rosdistro ${{ matrix.distro }} \
-            --skip-keys "ament_lint_common ament_lint_auto ament_pep257 ament_copyright ament_flake8"
-          apt-get install -y \
-            ros-${{ matrix.distro }}-ament-lint-common \
-            ros-${{ matrix.distro }}-ament-lint-auto \
-            ros-${{ matrix.distro }}-ament-pep257 \
-            ros-${{ matrix.distro }}-ament-copyright \
-            ros-${{ matrix.distro }}-ament-flake8
+            --rosdistro ${{ matrix.distro }}
 
       - name: Build
         shell: bash
