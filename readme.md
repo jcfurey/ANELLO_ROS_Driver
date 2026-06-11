@@ -5,6 +5,9 @@ ROS2 driver for [ANELLO Photonics](https://www.anellophotonics.com/) GNSS/INS de
 **New to ANELLO?** See the [Integration Guide](doc/integration_guide.md) for
 step-by-step instructions on wiring, configuring, and integrating the ANELLO
 EVK with your robotics platform (including `robot_localization` and Nav2).
+Using Ethernet as the primary link (recommended for robots)? Follow the
+[Ethernet Setup Guide](doc/ethernet_setup_guide.md) for mounting, unit
+configuration with the ANELLO user tool, and wiring into a ROS2 Jazzy stack.
 
 ## Supported Products
 
@@ -109,7 +112,7 @@ All parameters can be set via the launch file or on the command line.
 | `uart_data_port` | `AUTO` | UART data port path, or `AUTO` for auto-detection |
 | `uart_config_port` | `AUTO` | UART config port path, `AUTO`, or `OFF` to disable |
 | `baud_rate` | `230400` | Serial baud rate (`115200`, `230400`, `460800`, `921600`). The EVK ships at `921600`; the Ground INS/IMU default is `230400` — see [doc/anello_evk_reference.md](doc/anello_evk_reference.md) |
-| `remote_ip` | `192.168.1.111` | Device IP address (ethernet mode) |
+| `remote_ip` | `192.168.1.111` | Device IP address (ethernet mode). For full Ethernet setup — unit configuration with the ANELLO user tool, host networking, port mapping — see the [Ethernet Setup Guide](doc/ethernet_setup_guide.md) |
 | `local_data_port` | `1111` | Local UDP data port (ethernet mode) |
 | `local_config_port` | `2222` | Local UDP config port (ethernet mode) |
 | `local_odometer_port` | `3333` | Local UDP odometer port (ethernet mode) |

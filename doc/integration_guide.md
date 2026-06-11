@@ -23,6 +23,12 @@ troubleshooting.
 
 ## 1. Hardware Setup
 
+> **Using Ethernet as the primary data link?** (Recommended for robot
+> integrations — full 200 Hz rates, no USB-serial jitter.) Follow the
+> [Ethernet Setup Guide](ethernet_setup_guide.md) for unit configuration
+> with the ANELLO user tool, host networking, and driver launch, then
+> return here for TF, `robot_localization`, and Nav2 integration.
+
 ### 1.1 Connections
 
 The ANELLO EVK exposes two USB-serial ports when connected via USB:
