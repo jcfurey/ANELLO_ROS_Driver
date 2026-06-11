@@ -55,8 +55,14 @@ private:
 
     double wz_fog_std_dev;
     double wz_mems_std_dev;
-    
+
     int circular_buffer_index;
+
+    // FOG samples are buffered separately so exact-zero samples
+    // (transient dropout or FOG disabled) can be skipped without
+    // stalling the MEMS window.
+    bool fog_buffer_full;
+    int fog_circular_buffer_index;
 
     // ins message information
     double ins_heading;

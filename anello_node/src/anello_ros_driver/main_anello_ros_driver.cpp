@@ -9,9 +9,11 @@
  ********************************************************************************/
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <vector>
 #include <unistd.h>
@@ -38,8 +40,10 @@
 #include "nmea_msgs/msg/sentence.hpp"
 #include "rtcm_msgs/msg/message.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 
 #include "tf2/LinearMath/Quaternion.hpp"
+#include "tf2/LinearMath/Matrix3x3.hpp"
 #include "tf2_ros/transform_broadcaster.hpp"
 #include "diagnostic_updater/diagnostic_updater.hpp"
 
@@ -104,6 +108,7 @@ struct CovCache
 {
     double orient[9] = {};   // 3x3 row-major: roll, pitch, heading
     double pos[9] = {};      // 3x3 row-major: lat, lon, alt
+    double vel[9] = {};      // 3x3 row-major NED: vn, ve, vd
 };
 
 struct ReadBuffer
@@ -112,6 +117,55 @@ struct ReadBuffer
     int nbytes = 0;
     char buff[MAX_BUF_LEN] = {};
     rclcpp::Time stamp;  // host time captured at the port read
+};
+
+/* Sliding-window message/error rates for diagnostics: lifetime totals
+ * plus a trailing window, so a device that stops streaming (or a link
+ * that degrades) is visible on /diagnostics instead of showing the last
+ * known health flags as "nominal". Single-threaded access only. */
+struct RateMonitor
+{
+    static constexpr double kWindowSeconds = 5.0;
+
+    uint64_t total_ok = 0;
+    uint64_t total_checksum_fail = 0;
+    uint64_t total_parse_fail = 0;
+
+    void add_ok()            { total_ok++;            push(recent_ok_); }
+    void add_checksum_fail() { total_checksum_fail++; push(recent_err_); }
+    void add_parse_fail()    { total_parse_fail++;    push(recent_err_); }
+
+    double rate_hz()
+    {
+        trim(recent_ok_);
+        return static_cast<double>(recent_ok_.size()) / kWindowSeconds;
+    }
+    double error_percent()
+    {
+        trim(recent_ok_);
+        trim(recent_err_);
+        const size_t total = recent_ok_.size() + recent_err_.size();
+        return total > 0
+            ? 100.0 * static_cast<double>(recent_err_.size()) / static_cast<double>(total)
+            : 0.0;
+    }
+
+private:
+    std::deque<std::chrono::steady_clock::time_point> recent_ok_;
+    std::deque<std::chrono::steady_clock::time_point> recent_err_;
+
+    static void trim(std::deque<std::chrono::steady_clock::time_point> &q)
+    {
+        const auto cutoff = std::chrono::steady_clock::now() -
+            std::chrono::milliseconds(static_cast<int64_t>(kWindowSeconds * 1000));
+        while (!q.empty() && q.front() < cutoff)
+            q.pop_front();
+    }
+    static void push(std::deque<std::chrono::steady_clock::time_point> &q)
+    {
+        trim(q);
+        q.push_back(std::chrono::steady_clock::now());
+    }
 };
 
 class AnelloRosDriver : public rclcpp::Node
@@ -281,6 +335,12 @@ private:
         try {
             config_port_ = std::make_unique<anello_config_port>(&config_);
             config_port_->init();
+
+            // Fall back to the device-reported dual-antenna baseline when
+            // the parameter is unset; one blocking query (~500 ms) at
+            // startup, 0.0 on timeout keeps the check disabled.
+            if (get_parameter("heading_baseline").as_double() == 0.0)
+                health_msg_.set_baseline(config_port_->get_baseline());
         } catch (const std::exception &e) {
             RCLCPP_ERROR(get_logger(), "Config port init failed: %s", e.what());
             // Config port failure is not fatal — command service won't work
@@ -328,6 +388,7 @@ private:
         pub_ros_imu_raw_ = create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", sensor_qos);
         pub_navfix_ = create_publisher<sensor_msgs::msg::NavSatFix>("gps/fix", sensor_qos);
         pub_ins_fix_ = create_publisher<sensor_msgs::msg::NavSatFix>("ins/fix", sensor_qos);
+        pub_odom_ = create_publisher<nav_msgs::msg::Odometry>("odom", sensor_qos);
     }
 
     // ── Subscribers ────────────────────────────────────────────────────
@@ -454,17 +515,32 @@ private:
             uint8_t pos = health_msg_.get_position_status();
             uint8_t hdg = health_msg_.get_heading_status();
             uint8_t gyro = health_msg_.get_gyro_status();
+            const double rate_hz = rate_monitor_.rate_hz();
+            const double err_pct = rate_monitor_.error_percent();
 
-            if (pos == 0 && hdg == 0 && gyro == 0)
-                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::OK, "All systems nominal");
+            // Data flow gates first: stale health flags must not report
+            // "nominal" when the device has stopped streaming.
+            if (rate_monitor_.total_ok == 0 && rate_hz <= 0.0)
+                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::WARN, "No data received yet");
+            else if (rate_hz <= 0.0)
+                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::ERROR, "No data from device");
             else if (gyro > 0)
                 stat.summary(diagnostic_updater::DiagnosticStatusWrapper::ERROR, "Gyro health degraded");
+            else if (err_pct >= 20.0)
+                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::WARN, "High message error rate");
+            else if (pos == 0 && hdg == 0)
+                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::OK, "All systems nominal");
             else
                 stat.summary(diagnostic_updater::DiagnosticStatusWrapper::WARN, "Degraded accuracy");
 
             stat.add("position_accuracy", pos == 0 ? "cm" : (pos == 1 ? "m" : ">1m"));
             stat.add("heading_health", hdg == 0 ? "stable" : "unstable");
             stat.add("gyro_health", gyro == 0 ? "good" : "bad");
+            stat.add("message_rate_hz_recent", rate_hz);
+            stat.add("error_rate_percent_recent", err_pct);
+            stat.add("messages_total", static_cast<int64_t>(rate_monitor_.total_ok));
+            stat.add("checksum_failures_total", static_cast<int64_t>(rate_monitor_.total_checksum_fail));
+            stat.add("parse_failures_total", static_cast<int64_t>(rate_monitor_.total_parse_fail));
             stat.add("data_port", data_port_ ? data_port_->get_portname() : "N/A");
             stat.add("config_port", config_port_ ? config_port_->get_portname() : "N/A");
         });
@@ -501,8 +577,12 @@ private:
         {
             if (read_buf_.n_used >= read_buf_.nbytes)
             {
+                // Block (10 ms) only on the first read of a tick; the
+                // drain continuation polls with 0 ms so a trickling
+                // stream cannot hold the executor for 16 select() waits.
                 read_buf_.nbytes = static_cast<int>(
-                    data_port_->get_data(read_buf_.buff, MAX_BUF_LEN));
+                    data_port_->get_data(read_buf_.buff, MAX_BUF_LEN,
+                                         reads == 0 ? 10 : 0));
                 read_buf_.n_used = 0;
                 if (read_buf_.nbytes <= 0)
                     break;
@@ -510,12 +590,23 @@ private:
                 // messages decoded later from this buffer share it.
                 read_buf_.stamp = now();
             }
-            process_read_buffer();
+            if (process_read_buffer() == 0 && a1buff_.nbyte == 0)
+            {
+                // Bytes arrived, nothing decoded, and the parser is not
+                // mid-frame: garbage traffic (e.g. an NMEA receiver on the
+                // scanned port) never produces a complete ANELLO frame, so
+                // completed-message failures alone would never advance the
+                // port scan. A buffer that merely ends inside a partial
+                // frame (a1buff_.nbyte > 0) is not counted.
+                data_port_->port_parse_fail();
+            }
         }
     }
 
-    void process_read_buffer()
+    // Returns the number of validated messages decoded from the buffer.
+    int process_read_buffer()
     {
+        int ok_count = 0;
         while (read_buf_.n_used < read_buf_.nbytes)
         {
             int ret = input_a1_data(&a1buff_,
@@ -611,12 +702,21 @@ private:
             }
 
             if (is_ok) {
+                ok_count++;
+                rate_monitor_.add_ok();
                 data_port_->port_confirm();
             } else {
+                // num == 0 after an ASCII frame (ret == 1) only happens on
+                // a checksum failure; everything else is a parse failure.
+                if (ret == 1 && num == 0)
+                    rate_monitor_.add_checksum_fail();
+                else
+                    rate_monitor_.add_parse_fail();
                 data_port_->port_parse_fail();
             }
             a1buff_.nbyte = 0;
         }
+        return ok_count;
     }
 
 
@@ -820,6 +920,17 @@ private:
         cov_cache_.pos[6] = val[5]; // alt-lat
         cov_cache_.pos[7] = val[6]; // alt-lon
         cov_cache_.pos[8] = val[3]; // alt-alt
+
+        // Velocity covariance ((m/s)^2) indices 7-12, NED order
+        cov_cache_.vel[0] = val[7];  // vn-vn
+        cov_cache_.vel[1] = val[10]; // vn-ve
+        cov_cache_.vel[2] = val[11]; // vn-vd
+        cov_cache_.vel[3] = val[10]; // ve-vn (symmetric)
+        cov_cache_.vel[4] = val[8];  // ve-ve
+        cov_cache_.vel[5] = val[12]; // ve-vd
+        cov_cache_.vel[6] = val[11]; // vd-vn (symmetric)
+        cov_cache_.vel[7] = val[12]; // vd-ve (symmetric)
+        cov_cache_.vel[8] = val[9];  // vd-vd
     }
 
     void publish_ros_imu_and_nav(const double ins[], rclcpp::Time stamp)
@@ -892,6 +1003,103 @@ private:
             : sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
 
         pub_ins_fix_->publish(nav);
+
+        publish_odom(ins, stamp, q,
+                     nav.status.status != sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX);
+    }
+
+    // ── nav_msgs/Odometry on /odom ────────────────────────────────────
+    // Pose: local ENU position anchored at the first valid INS fix, with
+    // the APCOV position/orientation covariance. Twist: INS NED velocity
+    // rotated into the body (FLU) frame — nav_msgs/Odometry specifies
+    // twist in the child frame — with the APCOV velocity covariance
+    // rotated the same way; angular rates from the latest IMU sample.
+    void publish_odom(const double ins[], rclcpp::Time stamp,
+                      const tf2::Quaternion &q, bool position_valid)
+    {
+        auto odom = nav_msgs::msg::Odometry();
+        odom.header.stamp = stamp;
+        odom.header.frame_id = tf_parent_;
+        odom.child_frame_id = frame_ins_;
+
+        const double lat = ins[3], lon = ins[4], alt = ins[5];
+        if (!odom_origin_set_ && position_valid &&
+            std::isfinite(lat) && std::isfinite(lon) && std::isfinite(alt))
+        {
+            odom_ref_lat_ = lat;
+            odom_ref_lon_ = lon;
+            odom_ref_alt_ = alt;
+            odom_ref_coslat_ = std::cos(lat * kDeg2Rad);
+            odom_origin_set_ = true;
+            RCLCPP_INFO(get_logger(),
+                "odom origin anchored at lat=%.7f lon=%.7f alt=%.2f",
+                lat, lon, alt);
+        }
+
+        if (odom_origin_set_)
+        {
+            // Equirectangular local tangent plane: cm-accurate within the
+            // few-km scale a local odom frame is meant for.
+            constexpr double kEarthRadius = 6378137.0;
+            odom.pose.pose.position.x =
+                (lon - odom_ref_lon_) * kDeg2Rad * kEarthRadius * odom_ref_coslat_;
+            odom.pose.pose.position.y =
+                (lat - odom_ref_lat_) * kDeg2Rad * kEarthRadius;
+            odom.pose.pose.position.z = alt - odom_ref_alt_;
+        }
+
+        odom.pose.pose.orientation.x = q.x();
+        odom.pose.pose.orientation.y = q.y();
+        odom.pose.pose.orientation.z = q.z();
+        odom.pose.pose.orientation.w = q.w();
+
+        // Pose covariance: position block ENU-ordered from the APCOV
+        // lat/lon/alt cache (same mapping as ins/fix), orientation block
+        // converted exactly as imu/data.
+        const double *p = cov_cache_.pos;
+        const double pos_enu[9] = {
+            p[4], p[1], p[5],
+            p[1], p[0], p[2],
+            p[5], p[2], p[8],
+        };
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+            {
+                odom.pose.covariance[6 * r + c] = pos_enu[3 * r + c];
+                odom.pose.covariance[6 * (r + 3) + (c + 3)] =
+                    cov_cache_.orient[3 * r + c] * kDeg2RadSq * kEnuCovSign[3 * r + c];
+            }
+
+        // Twist: rotate NED world velocity into body FLU. R maps body to
+        // world (ENU), so v_body = R^T * v_enu.
+        const tf2::Matrix3x3 R(q);
+        const tf2::Vector3 v_enu(ins[7], ins[6], -ins[8]);  // ve, vn, -vd
+        const tf2::Vector3 v_body = R.transpose() * v_enu;
+        odom.twist.twist.linear.x = v_body.x();
+        odom.twist.twist.linear.y = v_body.y();
+        odom.twist.twist.linear.z = v_body.z();
+
+        const double wz = use_fog_wz_ ? imu_cache_.wz_fog : imu_cache_.wz;
+        odom.twist.twist.angular.x = imu_cache_.wx * kDeg2Rad;
+        odom.twist.twist.angular.y = -imu_cache_.wy * kDeg2Rad;
+        odom.twist.twist.angular.z = -wz * kDeg2Rad;
+
+        // Velocity covariance: NED cache -> ENU (permutation with sign
+        // flips on the cross terms involving D), then into the body frame
+        // with the same rotation as the velocity: C_body = R^T C_enu R.
+        const double *v = cov_cache_.vel;
+        const tf2::Matrix3x3 c_enu(
+            v[4], v[1], -v[5],
+            v[1], v[0], -v[2],
+            -v[5], -v[2], v[8]);
+        const tf2::Matrix3x3 c_body = R.transpose() * c_enu * R;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                odom.twist.covariance[6 * r + c] = c_body[r][c];
+        for (int i = 0; i < 3; ++i)
+            odom.twist.covariance[6 * (i + 3) + (i + 3)] = ang_vel_cov_[i];
+
+        pub_odom_->publish(odom);
     }
 
     // Raw GNSS solution on gps/fix: REP-145 consumers (notably
@@ -968,6 +1176,7 @@ private:
     ros_imu_pub_t pub_ros_imu_raw_;
     navfix_pub_t pub_navfix_;
     navfix_pub_t pub_ins_fix_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
 
     // Subscribers
     rclcpp::Subscription<rtcm_msgs::msg::Message>::SharedPtr sub_rtcm_;
@@ -1002,11 +1211,17 @@ private:
     // Decode state
     ReadBuffer read_buf_;
     a1buff_t a1buff_;
+    RateMonitor rate_monitor_;
     health_message health_msg_;
     ImuCache imu_cache_;
     CovCache cov_cache_;
     bool cov_received_ = false;
     bool cov_scale_warned_ = false;
+
+    // Local ENU origin for /odom, anchored at the first valid INS fix
+    bool odom_origin_set_ = false;
+    double odom_ref_lat_ = 0.0, odom_ref_lon_ = 0.0, odom_ref_alt_ = 0.0;
+    double odom_ref_coslat_ = 1.0;
 };
 
 } // namespace anello
@@ -1034,15 +1249,19 @@ static int input_a1_data(a1buff_t *a1, uint8_t data)
         a1->nbyte = 0;
         return 0;
     }
+    // On a header mismatch, re-run the rejected byte through start
+    // detection (single-level recursion: nbyte is 0 on re-entry) so a
+    // '#' or 0xD3 that aborts a false header still opens a new frame —
+    // otherwise "#A#APIMU,..." style streams drop the valid message.
     if (a1->nbyte == 1 && !((data == 'A' && a1->buf[0] == '#') || a1->buf[0] == 0xD3))
     {
         a1->nbyte = 0;
-        return 0;
+        return input_a1_data(a1, data);
     }
     if (a1->nbyte == 2 && !((data == 'P' && a1->buf[1] == 'A' && a1->buf[0] == '#') || a1->buf[0] == 0xD3))
     {
         a1->nbyte = 0;
-        return 0;
+        return input_a1_data(a1, data);
     }
 
     if (a1->nbyte == 0)

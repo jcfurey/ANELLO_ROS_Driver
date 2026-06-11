@@ -106,7 +106,10 @@ void anello_data_port::port_parse_fail()
 
 void anello_data_port::port_parse_fail_uart()
 {
-    if (this->decode_success || !this->auto_detect || !this->uart_port.get_port_enabled())
+    // No port_enabled gate here: if a rotation's init() failed (port
+    // unplugged, EBUSY), the port stays disabled and reads return 0 — the
+    // fail count must keep advancing or the scan deadlocks on the dead port.
+    if (this->decode_success || !this->auto_detect)
     {
         return;
     }
@@ -163,18 +166,27 @@ void anello_data_port::port_confirm_ethernet()
 
 size_t anello_data_port::get_data(char *buf, size_t buf_len)
 {
+    return this->get_data(buf, buf_len, 10);
+}
+
+size_t anello_data_port::get_data(char *buf, size_t buf_len, int timeout_ms)
+{
     if (this->config.type == ETH)
         return this->get_data_ethernet(buf, buf_len);
     else
-        return this->get_data_uart(buf, buf_len);
+        return this->get_data_uart(buf, buf_len, timeout_ms);
 }
 
-size_t anello_data_port::get_data_uart(char *buf, size_t buf_len)
+size_t anello_data_port::get_data_uart(char *buf, size_t buf_len, int timeout_ms)
 {
-    size_t bytes_read = this->uart_port.get_data(buf, buf_len, 10);
+    size_t bytes_read = this->uart_port.get_data(buf, buf_len, timeout_ms);
     if (bytes_read == 0)
     {
-        this->port_parse_fail();
+        // Only a blocking read that came up empty counts as "no data" for
+        // port rotation; a 0 ms drain poll returning empty is the normal
+        // end of a drained tick.
+        if (timeout_ms > 0)
+            this->port_parse_fail();
         return 0;
     }
     return bytes_read;

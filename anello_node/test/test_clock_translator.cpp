@@ -70,6 +70,32 @@ TEST(ClockTranslator, ResetsWhenDeviceTimeGoesBackwards)
     EXPECT_NEAR(ct.translate(1.0), 104.002, 1e-3);
 }
 
+TEST(ClockTranslator, ToleratesCrossStreamBackwardsSteps)
+{
+    ClockTranslator ct;
+    // Mixed-stream feed: a 100 Hz IMU stream interleaved with 4 Hz GNSS
+    // messages whose MCU times lag the IMU stream by ~100 ms (PVT
+    // computation latency). These small backwards steps must not reset
+    // the warm-up — only a reboot-scale jump may.
+    for (int i = 0; i < 300; ++i) {
+        const double device = i * 0.01;
+        ct.update(device, 100.0 + device + 0.002);
+        if (i > 10 && i % 25 == 0) {
+            const double gnss_device = device - 0.1;  // lags the IMU stream
+            ct.update(gnss_device, 100.0 + device + 0.003);
+        }
+    }
+    ASSERT_TRUE(ct.ready());
+    // The lagged messages must also not corrupt the learned offset.
+    const double residual = ct.translate(3.0) - 103.0;
+    EXPECT_GE(residual, 0.0);
+    EXPECT_LE(residual, 0.002 + 3.0 * ClockTranslator::kDriftBound + 1e-9);
+
+    // A reboot-scale backwards jump still resets.
+    ct.update(0.0, 103.1);
+    EXPECT_FALSE(ct.ready());
+}
+
 TEST(ClockTranslator, DriftCreepStaysBounded)
 {
     ClockTranslator ct;

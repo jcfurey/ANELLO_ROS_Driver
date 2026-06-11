@@ -92,7 +92,9 @@ health_message::health_message()
     this->wz_fog_moving_average = 0.0;
     this->wz_mems_std_dev = 1.0;
     this->wz_fog_std_dev = 1.0;
-    this->circular_buffer_index = 0.0;
+    this->circular_buffer_index = 0;
+    this->fog_buffer_full = false;
+    this->fog_circular_buffer_index = 0;
 
     for (int i = 0; i < IMU_MOVING_AVERAGE_SIZE; i++)
     {
@@ -124,19 +126,11 @@ void health_message::add_imu_message(double *imu_msg)
     double wz = imu_msg[6];
     double wz_fog = imu_msg[7];
 
-    // add new data
+    // MEMS path: every sample enters the window
     this->wz_mems_current_sum += wz;
-    this->wz_fog_current_sum += wz_fog;
-
-    // subtract old data
     this->wz_mems_current_sum -= this->wz_mems_circular_buffer[this->circular_buffer_index];
-    this->wz_fog_current_sum -= this->wz_fog_circular_buffer[this->circular_buffer_index];
-
-    // add to circular buffer
     this->wz_mems_circular_buffer[this->circular_buffer_index] = wz;
-    this->wz_fog_circular_buffer[this->circular_buffer_index] = wz_fog;
 
-    // increment circular buffer index
     this->circular_buffer_index++;
     if (this->circular_buffer_index >= IMU_MOVING_AVERAGE_SIZE)
     {
@@ -144,22 +138,47 @@ void health_message::add_imu_message(double *imu_msg)
         this->buffer_full = true;
     }
 
-    // update moving average when buffer is full
+    // FOG path: skip exact-zero samples (transient dropout, or FOG
+    // disabled) so a few zeros in the window don't bias the FOG mean
+    // toward zero and trip a spurious discrepancy fault during rotation.
+    // With the FOG disabled the window never fills and the gyro
+    // discrepancy check stays inactive.
+    if (wz_fog != 0.0)
+    {
+        this->wz_fog_current_sum += wz_fog;
+        this->wz_fog_current_sum -= this->wz_fog_circular_buffer[this->fog_circular_buffer_index];
+        this->wz_fog_circular_buffer[this->fog_circular_buffer_index] = wz_fog;
+
+        this->fog_circular_buffer_index++;
+        if (this->fog_circular_buffer_index >= IMU_MOVING_AVERAGE_SIZE)
+        {
+            this->fog_circular_buffer_index = 0;
+            this->fog_buffer_full = true;
+        }
+    }
+
+    // update moving averages when the windows are full
     if (this->buffer_full)
     {
         this->wz_mems_moving_average = this->wz_mems_current_sum / IMU_MOVING_AVERAGE_SIZE;
-        this->wz_fog_moving_average = this->wz_fog_current_sum / IMU_MOVING_AVERAGE_SIZE;
 
-        // calculate standard deviation
         double wz_mems_std_dev_sum = 0;
-        double wz_fog_std_dev_sum = 0;
         for (int i = 0; i < IMU_MOVING_AVERAGE_SIZE; i++)
         {
             wz_mems_std_dev_sum += pow(this->wz_mems_circular_buffer[i] - this->wz_mems_moving_average, 2);
+        }
+        this->wz_mems_std_dev = sqrt(wz_mems_std_dev_sum / IMU_MOVING_AVERAGE_SIZE);
+    }
+
+    if (this->fog_buffer_full)
+    {
+        this->wz_fog_moving_average = this->wz_fog_current_sum / IMU_MOVING_AVERAGE_SIZE;
+
+        double wz_fog_std_dev_sum = 0;
+        for (int i = 0; i < IMU_MOVING_AVERAGE_SIZE; i++)
+        {
             wz_fog_std_dev_sum += pow(this->wz_fog_circular_buffer[i] - this->wz_fog_moving_average, 2);
         }
-        
-        this->wz_mems_std_dev = sqrt(wz_mems_std_dev_sum / IMU_MOVING_AVERAGE_SIZE);
         this->wz_fog_std_dev = sqrt(wz_fog_std_dev_sum / IMU_MOVING_AVERAGE_SIZE);
     }
 }
@@ -313,19 +332,14 @@ bool health_message::has_gyro_discrepancy() const
 {
     bool ret_val = false;
 
-    // if moving average not ready yet, return false
-    if (this->buffer_full)
+    // Both windows must be ready: FOG stats accumulate only from nonzero
+    // samples, so with the optical gyro disabled (APCFG fog off) its
+    // window never fills and there is nothing to compare against.
+    if (this->buffer_full && this->fog_buffer_full)
     {
         // Above the optical gyro's range the channels legitimately diverge
         // (OG_WZ rails while the MEMS keeps tracking) — not a fault.
         if (fabs(this->wz_mems_moving_average) > FOG_SATURATION_GUARD_DPS)
-        {
-            return false;
-        }
-
-        // An exactly-zero FOG window means the optical gyro is disabled
-        // (APCFG fog off), not stuck — nothing to compare against.
-        if (this->wz_fog_moving_average == 0.0 && this->wz_fog_std_dev == 0.0)
         {
             return false;
         }

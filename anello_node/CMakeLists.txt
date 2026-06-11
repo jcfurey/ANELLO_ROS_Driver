@@ -15,6 +15,7 @@ find_package(anello_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(nmea_msgs REQUIRED)
 find_package(rtcm_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -43,6 +44,7 @@ target_link_libraries(anello_ros_driver_component PUBLIC
   ${std_msgs_TARGETS}
   ${sensor_msgs_TARGETS}
   ${geometry_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
   ${nmea_msgs_TARGETS}
   ${rtcm_msgs_TARGETS}
   tf2::tf2
