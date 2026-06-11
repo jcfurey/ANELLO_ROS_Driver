@@ -2,6 +2,7 @@
 
 import os
 import json
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -42,6 +43,11 @@ class NTRIPRos(Node):
                 ('reconnect_attempt_wait_seconds',
                  NTRIPClient.DEFAULT_RECONNECT_ATTEMPT_WAIT_SECONDS),
                 ('rtcm_timeout_seconds', NTRIPClient.DEFAULT_RTCM_TIMEOUT_SECONDS),
+                # NTRIP practice is a fresh GGA every 5-60 s; the ANELLO
+                # driver publishes GGA at the 4 Hz APGPS rate, so the
+                # forwarded stream is rate-limited here. 0 disables the
+                # throttle.
+                ('nmea_min_interval_seconds', 10.0),
             ]
         )
 
@@ -106,6 +112,10 @@ class NTRIPRos(Node):
         self._client.rtcm_timeout_seconds = \
             self.get_parameter('rtcm_timeout_seconds').value
 
+        self._nmea_min_interval = \
+            self.get_parameter('nmea_min_interval_seconds').value
+        self._last_nmea_send = None
+
     def run(self):
         if not self._client.connect():
             self.get_logger().error('Unable to connect to NTRIP server')
@@ -124,6 +134,14 @@ class NTRIPRos(Node):
         self._client.disconnect()
 
     def subscribe_nmea(self, nmea):
+        now = time.monotonic()
+        if (
+            self._nmea_min_interval > 0
+            and self._last_nmea_send is not None
+            and now - self._last_nmea_send < self._nmea_min_interval
+        ):
+            return
+        self._last_nmea_send = now
         self._client.send_nmea(nmea.sentence)
 
     def publish_rtcm(self):

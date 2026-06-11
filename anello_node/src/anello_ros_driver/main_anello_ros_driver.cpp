@@ -8,10 +8,12 @@
  * License:     MIT License
  ********************************************************************************/
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <vector>
 #include <unistd.h>
 #include <iomanip>
 #include <memory>
@@ -94,6 +96,7 @@ struct ImuCache
 {
     double ax = 0.0, ay = 0.0, az = 0.0;
     double wx = 0.0, wy = 0.0, wz = 0.0;
+    double wz_fog = 0.0;
 };
 
 struct CovCache
@@ -178,6 +181,24 @@ private:
         declare_parameter("heading_baseline", 0.0,
             d("Dual-antenna baseline length in meters, used to validate the "
               "APHDG heading in the health monitor (0.0 = skip the check)"));
+
+        declare_parameter("use_fog_wz", true,
+            d("Use the optical gyro (OG_WZ) for the z angular rate in the "
+              "standard imu/data and imu/data_raw messages instead of the "
+              "MEMS WZ. Set false if the FOG is disabled on the unit "
+              "(APCFG fog off)."));
+
+        // Defaults derived from the ANELLO GNSS INS datasheet noise specs at
+        // 100 Hz: MEMS gyro ARW 0.3 deg/sqrt(hr), optical Z gyro ARW
+        // 0.05 deg/sqrt(hr), accelerometer VRW 0.03 m/s/sqrt(hr).
+        declare_parameter("covariance.angular_velocity",
+            std::vector<double>{7.6e-7, 7.6e-7, 2.1e-8},
+            d("Diagonal angular velocity covariance [x, y, z] in (rad/s)^2 "
+              "for imu/data and imu/data_raw (REP-145 parameter override)"));
+        declare_parameter("covariance.linear_acceleration",
+            std::vector<double>{2.5e-5, 2.5e-5, 2.5e-5},
+            d("Diagonal linear acceleration covariance [x, y, z] in "
+              "(m/s^2)^2 for imu/data and imu/data_raw"));
     }
 
     void read_parameters()
@@ -204,6 +225,21 @@ private:
         tf_parent_ = get_parameter("tf_parent_frame").as_string();
         poll_ms_ = get_parameter("poll_interval_ms").as_int();
         health_msg_.set_baseline(get_parameter("heading_baseline").as_double());
+        use_fog_wz_ = get_parameter("use_fog_wz").as_bool();
+
+        auto read_cov3 = [this](const char *name, double out[3]) {
+            auto v = get_parameter(name).as_double_array();
+            if (v.size() == 3) {
+                std::copy(v.begin(), v.end(), out);
+            } else {
+                RCLCPP_WARN(get_logger(),
+                    "%s must have exactly 3 elements, got %zu — using zeros "
+                    "(covariance unknown)", name, v.size());
+                std::fill(out, out + 3, 0.0);
+            }
+        };
+        read_cov3("covariance.angular_velocity", ang_vel_cov_);
+        read_cov3("covariance.linear_acceleration", lin_acc_cov_);
 
         RCLCPP_INFO(get_logger(), "com_type=%s baud=%u poll=%ldms",
                      com_type.c_str(), config_.baud_rate, poll_ms_);
@@ -260,6 +296,7 @@ private:
         pub_gga_ = create_publisher<nmea_msgs::msg::Sentence>("ntrip_client/nmea", 1);
 
         pub_ros_imu_ = create_publisher<sensor_msgs::msg::Imu>("imu/data", sensor_qos);
+        pub_ros_imu_raw_ = create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", sensor_qos);
         pub_navfix_ = create_publisher<sensor_msgs::msg::NavSatFix>("gps/fix", sensor_qos);
     }
 
@@ -500,6 +537,7 @@ private:
                 {
                     decode_ascii_imu(val, num, decoded_val);
                     publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
+                    publish_ros_imu_raw(decoded_val, stamp);
                     health_msg_.add_imu_message(decoded_val);
                     store_last_imu(decoded_val);
                     is_ok = true;
@@ -508,6 +546,7 @@ private:
                 {
                     decode_ascii_im1(val, num, decoded_val);
                     publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
+                    publish_ros_imu_raw(decoded_val, stamp);
                     is_ok = true;
                 }
                 else if (num >= 20 && strstr(val[0], "APCOV") != nullptr)
@@ -565,6 +604,7 @@ private:
                 return false;
             decode_rtcm_imu_msg(decoded_val, a1buff_);
             publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
+            publish_ros_imu_raw(decoded_val, stamp);
             health_msg_.add_imu_message(decoded_val);
             store_last_imu(decoded_val);
             return true;
@@ -606,6 +646,7 @@ private:
                 return false;
             decode_rtcm_im1_msg(decoded_val, a1buff_);
             publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
+            publish_ros_imu_raw(decoded_val, stamp);
             return true;
 
         case 10: // APCOV
@@ -626,6 +667,50 @@ private:
     {
         imu_cache_.ax = val[1]; imu_cache_.ay = val[2]; imu_cache_.az = val[3];
         imu_cache_.wx = val[4]; imu_cache_.wy = val[5]; imu_cache_.wz = val[6];
+        imu_cache_.wz_fog = val[7];
+    }
+
+    // Body-frame measurements converted FRD -> FLU and to SI units, shared
+    // by imu/data and imu/data_raw.
+    void fill_imu_body_measurements(sensor_msgs::msg::Imu &msg,
+                                    const ImuCache &imu) const
+    {
+        const double wz = use_fog_wz_ ? imu.wz_fog : imu.wz;
+        msg.angular_velocity.x = imu.wx * kDeg2Rad;
+        msg.angular_velocity.y = -imu.wy * kDeg2Rad;
+        msg.angular_velocity.z = -wz * kDeg2Rad;
+
+        msg.linear_acceleration.x = imu.ax * kGAccel;
+        msg.linear_acceleration.y = -imu.ay * kGAccel;
+        msg.linear_acceleration.z = -imu.az * kGAccel;
+
+        // Diagonal covariances from parameters; all-zero still means
+        // "unknown" per REP-145. The FRD->FLU axis flips do not change a
+        // diagonal covariance.
+        for (int i = 0; i < 3; ++i) {
+            msg.angular_velocity_covariance[4 * i] = ang_vel_cov_[i];
+            msg.linear_acceleration_covariance[4 * i] = lin_acc_cov_[i];
+        }
+    }
+
+    // REP-145 imu/data_raw: accelerometer + gyroscope only, published at
+    // the sensor rate (every APIMU/APIM1). orientation_covariance[0] = -1
+    // marks the orientation field as unreported.
+    void publish_ros_imu_raw(const double val[], rclcpp::Time stamp)
+    {
+        ImuCache imu;
+        imu.ax = val[1]; imu.ay = val[2]; imu.az = val[3];
+        imu.wx = val[4]; imu.wy = val[5]; imu.wz = val[6];
+        imu.wz_fog = val[7];
+
+        auto msg = sensor_msgs::msg::Imu();
+        msg.header.stamp = stamp;
+        msg.header.frame_id = frame_imu_;
+        msg.orientation.w = 1.0;
+        msg.orientation_covariance[0] = -1.0;
+        fill_imu_body_measurements(msg, imu);
+
+        pub_ros_imu_raw_->publish(msg);
     }
 
     void store_last_cov(const double val[])
@@ -668,13 +753,7 @@ private:
         imu_msg.orientation.z = q.z();
         imu_msg.orientation.w = q.w();
 
-        imu_msg.angular_velocity.x = imu_cache_.wx * kDeg2Rad;
-        imu_msg.angular_velocity.y = -imu_cache_.wy * kDeg2Rad;
-        imu_msg.angular_velocity.z = -imu_cache_.wz * kDeg2Rad;
-
-        imu_msg.linear_acceleration.x = imu_cache_.ax * kGAccel;
-        imu_msg.linear_acceleration.y = -imu_cache_.ay * kGAccel;
-        imu_msg.linear_acceleration.z = -imu_cache_.az * kGAccel;
+        fill_imu_body_measurements(imu_msg, imu_cache_);
 
         // All-zero covariance means "unknown" per sensor_msgs convention,
         // which is what cov_cache_ holds until the first APCOV arrives.
@@ -744,6 +823,7 @@ private:
     health_pub_t pub_health_;
     gga_pub_t pub_gga_;
     ros_imu_pub_t pub_ros_imu_;
+    ros_imu_pub_t pub_ros_imu_raw_;
     navfix_pub_t pub_navfix_;
 
     // Subscribers
@@ -768,6 +848,9 @@ private:
     bool publish_tf_ = true;
     std::string tf_parent_;
     int64_t poll_ms_ = 5;
+    bool use_fog_wz_ = true;
+    double ang_vel_cov_[3] = {};
+    double lin_acc_cov_[3] = {};
 
     // Decode state
     ReadBuffer read_buf_;

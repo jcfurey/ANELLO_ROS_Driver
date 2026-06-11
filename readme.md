@@ -142,6 +142,14 @@ All parameters can be set via the launch file or on the command line.
 |-----------|---------|-------------|
 | `heading_baseline` | `0.0` | Dual-antenna baseline length in meters, used to validate APHDG heading in the health monitor (`0.0` = skip the baseline check) |
 
+#### Standard IMU Output (REP-145)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `use_fog_wz` | `true` | Use the optical gyro (`OG_WZ`) for the z angular rate in `imu/data` and `imu/data_raw` instead of the MEMS `WZ`. Set `false` if the FOG is disabled on the unit (`APCFG fog off`) |
+| `covariance.angular_velocity` | `[7.6e-7, 7.6e-7, 2.1e-8]` | Diagonal angular velocity covariance `[x, y, z]` in (rad/s)². Defaults derived from the ANELLO datasheet ARW specs at 100 Hz (MEMS X/Y: 0.3°/√hr; optical Z: 0.05°/√hr) |
+| `covariance.linear_acceleration` | `[2.5e-5, 2.5e-5, 2.5e-5]` | Diagonal linear acceleration covariance `[x, y, z]` in (m/s²)². Default derived from the 0.03 m/s/√hr VRW spec at 100 Hz |
+
 ### NTRIP Client Parameters
 
 | Parameter | Default | Description |
@@ -153,7 +161,14 @@ All parameters can be set via the launch file or on the command line.
 | `ntrip_username` | (empty) | NTRIP username |
 | `ntrip_password` | (empty) | NTRIP password |
 
-Additional NTRIP parameters (`ssl`, `cert`, `key`, `ca_cert`, `reconnect_attempt_max`, `reconnect_attempt_wait_seconds`, `rtcm_timeout_seconds`) can be passed directly to the `ntrip_client` node.
+Additional NTRIP parameters (`ssl`, `cert`, `key`, `ca_cert`, `reconnect_attempt_max`, `reconnect_attempt_wait_seconds`, `rtcm_timeout_seconds`, `ntrip_version`, `nmea_min_interval_seconds`) can be passed directly to the `ntrip_client` node.
+
+The client speaks NTRIP rev1 by default. Set `ntrip_version` to `Ntrip/2.0`
+for rev2 casters: the request is then sent as HTTP/1.1 with the required
+`Host` and `Ntrip-Version` headers, and chunked transfer encoding is
+decoded automatically. GGA sentences forwarded to the caster are
+rate-limited to one per `nmea_min_interval_seconds` (default 10 s, `0`
+disables the throttle), per standard NTRIP caster practice (5–60 s).
 
 ## Topics
 
@@ -178,7 +193,8 @@ All custom messages include a `std_msgs/Header` with timestamp and frame ID. Mes
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `imu/data` | `sensor_msgs/Imu` | Standard IMU message with orientation quaternion, angular velocity, linear acceleration, and covariance |
+| `imu/data_raw` | `sensor_msgs/Imu` | Accelerometer + gyroscope at the sensor rate (every APIMU/APIM1), no orientation (`orientation_covariance[0] = -1` per REP-145) |
+| `imu/data` | `sensor_msgs/Imu` | Same as `imu/data_raw` plus the INS orientation quaternion, published at the INS rate |
 | `gps/fix` | `sensor_msgs/NavSatFix` | Standard GNSS fix with position covariance |
 | `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA sentence forwarded to NTRIP caster |
 
