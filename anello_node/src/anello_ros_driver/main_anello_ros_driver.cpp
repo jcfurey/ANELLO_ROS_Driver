@@ -182,6 +182,18 @@ private:
             d("Dual-antenna baseline length in meters, used to validate the "
               "APHDG heading in the health monitor (0.0 = skip the check)"));
 
+        // The at-rest accelerometer sign convention is not stated in the
+        // public manual. The FLU conversion below assumes the device
+        // reports specific force in FRD (at rest: AZ = -1 g), but the
+        // manual's example APIMU capture shows AZ = +1 g upright, which
+        // would make every published axis inverted. Bench check: with the
+        // vehicle stationary, imu/data linear_acceleration.z must read
+        // +9.8; if it reads -9.8, set this parameter true.
+        declare_parameter("flip_accel_sign", false,
+            d("Negate all linear acceleration axes in imu/data and "
+              "imu/data_raw. Use when a stationary unit reports -9.8 "
+              "instead of +9.8 on linear_acceleration.z."));
+
         declare_parameter("use_fog_wz", true,
             d("Use the optical gyro (OG_WZ) for the z angular rate in the "
               "standard imu/data and imu/data_raw messages instead of the "
@@ -226,6 +238,7 @@ private:
         poll_ms_ = get_parameter("poll_interval_ms").as_int();
         health_msg_.set_baseline(get_parameter("heading_baseline").as_double());
         use_fog_wz_ = get_parameter("use_fog_wz").as_bool();
+        flip_accel_sign_ = get_parameter("flip_accel_sign").as_bool();
 
         auto read_cov3 = [this](const char *name, double out[3]) {
             auto v = get_parameter(name).as_double_array();
@@ -683,9 +696,10 @@ private:
         msg.angular_velocity.y = -imu.wy * kDeg2Rad;
         msg.angular_velocity.z = -wz * kDeg2Rad;
 
-        msg.linear_acceleration.x = imu.ax * kGAccel;
-        msg.linear_acceleration.y = -imu.ay * kGAccel;
-        msg.linear_acceleration.z = -imu.az * kGAccel;
+        const double accel_sign = flip_accel_sign_ ? -1.0 : 1.0;
+        msg.linear_acceleration.x = accel_sign * imu.ax * kGAccel;
+        msg.linear_acceleration.y = accel_sign * -imu.ay * kGAccel;
+        msg.linear_acceleration.z = accel_sign * -imu.az * kGAccel;
 
         // Diagonal covariances from parameters; all-zero still means
         // "unknown" per REP-145. The FRD->FLU axis flips do not change a
@@ -917,6 +931,7 @@ private:
     std::string tf_parent_;
     int64_t poll_ms_ = 5;
     bool use_fog_wz_ = true;
+    bool flip_accel_sign_ = false;
     double ang_vel_cov_[3] = {};
     double lin_acc_cov_[3] = {};
 

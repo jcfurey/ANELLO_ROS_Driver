@@ -177,6 +177,15 @@ ros2 topic echo /anello/ins --once
 ros2 topic echo /anello/health
 ```
 
+**Accelerometer sign check (do this once per setup):** with the vehicle
+stationary and level, `linear_acceleration.z` on `/imu/data` must read
+approximately **+9.8** (REP-145 convention: gravity reaction along +z in
+the FLU body frame). If it reads **-9.8**, the unit firmware reports
+acceleration with the opposite sign convention — set the driver parameter
+`flip_accel_sign:=true`. Getting this wrong inverts gravity for every
+downstream consumer (`robot_localization`, Madgwick/complementary
+filters), which typically shows up as immediate roll/pitch divergence.
+
 ### 3.3 Check Message Rates
 
 ```bash

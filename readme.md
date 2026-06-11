@@ -147,6 +147,7 @@ All parameters can be set via the launch file or on the command line.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `use_fog_wz` | `true` | Use the optical gyro (`OG_WZ`) for the z angular rate in `imu/data` and `imu/data_raw` instead of the MEMS `WZ`. Set `false` if the FOG is disabled on the unit (`APCFG fog off`) |
+| `flip_accel_sign` | `false` | Negate all `linear_acceleration` axes in `imu/data`/`imu/data_raw`. The device's at-rest accelerometer sign convention is not in the public manual — verify on the bench: stationary `linear_acceleration.z` must read **+9.8**; if it reads −9.8, set this `true` (see the [integration guide](doc/integration_guide.md)) |
 | `covariance.angular_velocity` | `[7.6e-7, 7.6e-7, 2.1e-8]` | Diagonal angular velocity covariance `[x, y, z]` in (rad/s)². Defaults derived from the ANELLO datasheet ARW specs at 100 Hz (MEMS X/Y: 0.3°/√hr; optical Z: 0.05°/√hr) |
 | `covariance.linear_acceleration` | `[2.5e-5, 2.5e-5, 2.5e-5]` | Diagonal linear acceleration covariance `[x, y, z]` in (m/s²)². Default derived from the 0.03 m/s/√hr VRW spec at 100 Hz |
 
