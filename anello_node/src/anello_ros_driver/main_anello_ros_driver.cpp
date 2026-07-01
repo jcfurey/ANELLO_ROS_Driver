@@ -590,14 +590,18 @@ private:
                 // messages decoded later from this buffer share it.
                 read_buf_.stamp = now();
             }
-            if (process_read_buffer() == 0 && a1buff_.nbyte == 0)
+            if (process_read_buffer() == 0 && a1buff_.nbyte == 0 &&
+                !frame_fail_reported_)
             {
                 // Bytes arrived, nothing decoded, and the parser is not
                 // mid-frame: garbage traffic (e.g. an NMEA receiver on the
                 // scanned port) never produces a complete ANELLO frame, so
                 // completed-message failures alone would never advance the
                 // port scan. A buffer that merely ends inside a partial
-                // frame (a1buff_.nbyte > 0) is not counted.
+                // frame (a1buff_.nbyte > 0) is not counted. If a frame WAS
+                // completed and failed (frame_fail_reported_), that
+                // failure was already reported inside process_read_buffer()
+                // and must not be counted a second time here.
                 data_port_->port_parse_fail();
             }
         }
@@ -607,6 +611,7 @@ private:
     int process_read_buffer()
     {
         int ok_count = 0;
+        frame_fail_reported_ = false;
         while (read_buf_.n_used < read_buf_.nbytes)
         {
             int ret = input_a1_data(&a1buff_,
@@ -713,6 +718,7 @@ private:
                 else
                     rate_monitor_.add_parse_fail();
                 data_port_->port_parse_fail();
+                frame_fail_reported_ = true;
             }
             a1buff_.nbyte = 0;
         }
@@ -1211,6 +1217,7 @@ private:
     // Decode state
     ReadBuffer read_buf_;
     a1buff_t a1buff_;
+    bool frame_fail_reported_ = false;
     RateMonitor rate_monitor_;
     health_message health_msg_;
     ImuCache imu_cache_;

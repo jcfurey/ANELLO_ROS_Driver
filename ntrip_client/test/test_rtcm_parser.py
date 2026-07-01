@@ -67,3 +67,15 @@ def test_interleaved_partial_delivery():
     for i in range(0, len(stream), 7):
         collected.extend(parser.parse(stream[i:i + 7]))
     assert collected == frames
+
+
+def test_reset_drops_stale_partial_frame():
+    # A partial frame left over from a dropped connection must not be
+    # spliced onto the next connection's stream after reset().
+    parser = RTCMParser()
+    frame = make_frame(b'\x43\x50' + b'\x01' * 20)
+    assert parser.parse(frame[:10]) == []
+    assert parser._buffer == frame[:10]
+    parser.reset()
+    assert parser._buffer == b''
+    assert parser.parse(frame[10:]) == []
