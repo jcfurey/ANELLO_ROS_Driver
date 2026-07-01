@@ -1,4 +1,8 @@
-"""Protocol-level tests for the NTRIP client (no network required)."""
+"""Protocol-level tests for the NTRIP client (loopback sockets only)."""
+
+import socket
+import threading
+import time
 
 from ntrip_client.ntrip_client import NTRIPClient
 
@@ -6,6 +10,46 @@ from ntrip_client.ntrip_client import NTRIPClient
 def make_client(version=None, username=None, password=None):
     return NTRIPClient(
         'caster.example.com', 2101, 'MOUNT', version, username, password)
+
+
+class FakeCaster:
+    """Loopback listener that answers one connection with canned bytes."""
+
+    def __init__(self, response_segments):
+        self._segments = response_segments
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(('127.0.0.1', 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self._conn = None
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        self._conn, _ = self._listener.accept()
+        self._conn.recv(4096)  # the client's HTTP request
+        for i, segment in enumerate(self._segments):
+            if i > 0:
+                # Let the client drain the previous segment first so the
+                # segments arrive as separate recv() results.
+                time.sleep(0.05)
+            self._conn.sendall(segment)
+
+    def close(self):
+        self._thread.join(timeout=5)
+        if self._conn:
+            self._conn.close()
+        self._listener.close()
+
+
+def connect_to_fake_caster(response_segments):
+    caster = FakeCaster(response_segments)
+    client = make_client()
+    client._host, client._port = '127.0.0.1', caster.port
+    try:
+        return client, client.connect()
+    finally:
+        caster.close()
 
 
 def test_v1_request_format():
@@ -77,3 +121,54 @@ def test_connect_resets_stale_rtcm_buffer():
     client._host, client._port = '127.0.0.1', 1  # nothing listening: fails fast
     assert client.connect() is False
     assert client._rtcm_parser._buffer == b''
+
+
+def test_connect_resets_stream_health_state():
+    # A successful (re)connect must disarm the RTCM-timeout gate and
+    # zero the dead connection's failure counters, or a reconnect that
+    # took longer than rtcm_timeout_seconds is immediately torn down
+    # again by the stale timestamp.
+    client = make_client()
+    client._first_rtcm_received = True
+    client._read_zero_bytes_count = 3
+    client._nmea_send_failed_count = 2
+    client._host = '127.0.0.1'
+    caster = FakeCaster([b'ICY 200 OK\r\n\r\n'])
+    client._port = caster.port
+    try:
+        assert client.connect() is True
+    finally:
+        caster.close()
+    assert client._first_rtcm_received is False
+    assert client._read_zero_bytes_count == 0
+    assert client._nmea_send_failed_count == 0
+    assert client.connected is True
+
+
+def test_connect_reads_fragmented_http_headers():
+    # An HTTP/1.1 header block split across TCP segments must still be
+    # read to its \r\n\r\n terminator; stopping at the first segment
+    # misses Transfer-Encoding and feeds chunk framing to the parser.
+    payload = b'\xd3\x00\x04AAAA'
+    client, ok = connect_to_fake_caster([
+        b'HTTP/1.1 200 OK\r\nContent-Type: gnss/data\r\nTransfer-',
+        b'Encoding: chunked\r\n\r\n7\r\n' + payload + b'\r\n',
+    ])
+    assert ok is True
+    assert client._response_chunked is True
+    # Stream bytes that arrived with the headers are preserved
+    assert client._dechunk(client._pending_stream_data) == payload
+
+
+def test_connect_ssl_failure_returns_false():
+    # A TLS handshake failure (here: a plain-TCP caster) must fail the
+    # connect so reconnect logic can retry, not raise out of connect()
+    # and kill the node.
+    caster = FakeCaster([b'ICY 200 OK\r\n\r\n'])
+    client = make_client()
+    client._host, client._port = '127.0.0.1', caster.port
+    client.ssl = True
+    try:
+        assert client.connect() is False
+    finally:
+        caster.close()

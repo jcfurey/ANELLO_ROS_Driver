@@ -61,7 +61,20 @@ class NMEAParser:
         # Checksum check
         data, expected_checksum_str = sentence.rsplit(
             _NMEA_CHECKSUM_SEPERATOR, 1)
-        expected_checksum = int(expected_checksum_str, 16)
+        try:
+            expected_checksum = int(expected_checksum_str, 16)
+        except ValueError:
+            self._logwarn(
+                'Received invalid NMEA sentence. Checksum field is '
+                'not valid hex: {}'.format(expected_checksum_str.strip()))
+            self._logwarn('Sentence: {}'.format(sentence))
+            return False
+        if expected_checksum < 0:
+            self._logwarn(
+                'Received invalid NMEA sentence. Checksum field is '
+                'negative: {}'.format(expected_checksum_str.strip()))
+            self._logwarn('Sentence: {}'.format(sentence))
+            return False
         calculated_checksum = 0
         for char in data[1:]:
             calculated_checksum ^= ord(char)

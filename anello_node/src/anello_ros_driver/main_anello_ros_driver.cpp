@@ -447,6 +447,15 @@ private:
         std::string ck = compute_checksum(body.c_str(), body.size());
         std::string full = "#" + body + "*" + ck + "\r\n";
 
+        // Drain stale bytes (a previous call's late response, unsolicited
+        // APODO acks on the shared UART) so they can't be returned as
+        // this command's response; bounded in case the port is streaming.
+        for (int i = 0;
+             i < 32 && config_port_->get_data(read_buf, kMaxResp - 1, 0) > 0;
+             ++i)
+        {
+        }
+
         config_port_->write_data(full.c_str(), static_cast<int>(full.size()));
 
         auto start = std::chrono::steady_clock::now();
@@ -483,18 +492,22 @@ private:
             tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     }
 
-    void broadcast_ins_tf(double roll_deg, double pitch_deg, double heading_deg)
+    void broadcast_ins_tf(double roll_deg, double pitch_deg, double heading_deg,
+                          rclcpp::Time stamp)
     {
         if (!tf_broadcaster_) return;
 
         geometry_msgs::msg::TransformStamped t;
-        t.header.stamp = now();
+        t.header.stamp = stamp;
         t.header.frame_id = tf_parent_;
         t.child_frame_id = frame_ins_;
 
-        t.transform.translation.x = 0.0;
-        t.transform.translation.y = 0.0;
-        t.transform.translation.z = 0.0;
+        // Same translation as the /odom pose for this INS message (zero
+        // until the odom origin anchors): TF and /odom describe the same
+        // odom -> ins transform and must not disagree.
+        t.transform.translation.x = odom_pos_enu_[0];
+        t.transform.translation.y = odom_pos_enu_[1];
+        t.transform.translation.z = odom_pos_enu_[2];
 
         tf2::Quaternion q = ned_rpy_deg_to_enu_quat(roll_deg, pitch_deg, heading_deg);
         t.transform.rotation.x = q.x();
@@ -559,6 +572,12 @@ private:
 
     void health_callback()
     {
+        // Never received a message, or the stream has gone silent: the
+        // flags describe a device that isn't talking, and restamping
+        // them with now() would present them as fresh "all good".
+        // /diagnostics carries the explicit no-data ERROR state.
+        if (rate_monitor_.total_ok == 0 || rate_monitor_.rate_hz() <= 0.0)
+            return;
         publish_health(&health_msg_, pub_health_, now());
     }
 
@@ -697,7 +716,8 @@ private:
                     publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
                     health_msg_.add_ins_message(decoded_val);
                     publish_ros_imu_and_nav(decoded_val, stamp);
-                    broadcast_ins_tf(decoded_val[9], decoded_val[10], decoded_val[11]);
+                    broadcast_ins_tf(decoded_val[9], decoded_val[10],
+                                     decoded_val[11], stamp);
                     is_ok = true;
                 }
             }
@@ -810,7 +830,8 @@ private:
             publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
             health_msg_.add_ins_message(decoded_val);
             publish_ros_imu_and_nav(decoded_val, stamp);
-            broadcast_ins_tf(decoded_val[9], decoded_val[10], decoded_val[11]);
+            broadcast_ins_tf(decoded_val[9], decoded_val[10],
+                             decoded_val[11], stamp);
             return true;
 
         case 6: // IM1
@@ -1035,7 +1056,18 @@ private:
             odom_ref_lat_ = lat;
             odom_ref_lon_ = lon;
             odom_ref_alt_ = alt;
-            odom_ref_coslat_ = std::cos(lat * kDeg2Rad);
+            // Local tangent plane scale at the anchor. The spherical
+            // approximation (a·π/180 on both axes) is off by up to 0.7%
+            // per axis, meters of systematic error within a km — far
+            // outside the cm-level RTK covariance published alongside.
+            constexpr double kWgs84A = 6378137.0;
+            constexpr double kWgs84E2 = 6.69437999014e-3;
+            const double slat = std::sin(lat * kDeg2Rad);
+            const double denom = 1.0 - kWgs84E2 * slat * slat;
+            odom_m_per_deg_lat_ = kDeg2Rad * kWgs84A * (1.0 - kWgs84E2) /
+                                  (denom * std::sqrt(denom));
+            odom_m_per_deg_lon_ = kDeg2Rad * (kWgs84A / std::sqrt(denom)) *
+                                  std::cos(lat * kDeg2Rad);
             odom_origin_set_ = true;
             RCLCPP_INFO(get_logger(),
                 "odom origin anchored at lat=%.7f lon=%.7f alt=%.2f",
@@ -1044,14 +1076,22 @@ private:
 
         if (odom_origin_set_)
         {
-            // Equirectangular local tangent plane: cm-accurate within the
-            // few-km scale a local odom frame is meant for.
-            constexpr double kEarthRadius = 6378137.0;
-            odom.pose.pose.position.x =
-                (lon - odom_ref_lon_) * kDeg2Rad * kEarthRadius * odom_ref_coslat_;
+            // Wrap the longitude delta so an anchor near the antimeridian
+            // doesn't produce a ±360° jump when the vehicle crosses it.
+            double dlon = lon - odom_ref_lon_;
+            if (dlon > 180.0)
+                dlon -= 360.0;
+            else if (dlon < -180.0)
+                dlon += 360.0;
+            odom.pose.pose.position.x = dlon * odom_m_per_deg_lon_;
             odom.pose.pose.position.y =
-                (lat - odom_ref_lat_) * kDeg2Rad * kEarthRadius;
+                (lat - odom_ref_lat_) * odom_m_per_deg_lat_;
             odom.pose.pose.position.z = alt - odom_ref_alt_;
+            // Keep the broadcast TF (same odom -> ins frame pair)
+            // consistent with this pose.
+            odom_pos_enu_[0] = odom.pose.pose.position.x;
+            odom_pos_enu_[1] = odom.pose.pose.position.y;
+            odom_pos_enu_[2] = odom.pose.pose.position.z;
         }
 
         odom.pose.pose.orientation.x = q.x();
@@ -1228,7 +1268,9 @@ private:
     // Local ENU origin for /odom, anchored at the first valid INS fix
     bool odom_origin_set_ = false;
     double odom_ref_lat_ = 0.0, odom_ref_lon_ = 0.0, odom_ref_alt_ = 0.0;
-    double odom_ref_coslat_ = 1.0;
+    double odom_m_per_deg_lat_ = 111132.0;  // overwritten at anchor time
+    double odom_m_per_deg_lon_ = 111319.0;
+    double odom_pos_enu_[3] = {};  // last anchored ENU position, for TF
 };
 
 } // namespace anello
@@ -1247,7 +1289,11 @@ static int input_a1_data(a1buff_t *a1, uint8_t data)
 {
     int ret = 0;
 
-    if (a1->nbyte >= MAX_BUF_LEN)
+    // Reset one byte early: buf is zeroed at frame start, so capping
+    // nbyte at MAX_BUF_LEN - 1 keeps buf[MAX_BUF_LEN - 1] an untouched
+    // NUL. A frame completing at exactly MAX_BUF_LEN bytes would
+    // otherwise reach parse_fields()/"%s" logging unterminated.
+    if (a1->nbyte >= MAX_BUF_LEN - 1)
         a1->nbyte = 0;
 
     // Detect correct start characters: #AP or 0xD3
