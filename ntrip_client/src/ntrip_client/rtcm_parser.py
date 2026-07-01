@@ -58,6 +58,11 @@ class RTCMParser:
         # Unparsed remainder carried between calls
         self._buffer = b''
 
+    def reset(self):
+        # Drop any unparsed remainder from a prior connection so bytes
+        # from a dead TCP session never get spliced onto a new one.
+        self._buffer = b''
+
     def parse(self, buffer):
         # Prepend any bytes left over from the previous call. self._buffer
         # is the single source of truth for unparsed data; we never mix

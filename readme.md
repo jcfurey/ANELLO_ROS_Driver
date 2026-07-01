@@ -392,7 +392,7 @@ colcon test --packages-select anello_interfaces anello_ros_driver ntrip_client
 colcon test-result --verbose
 ```
 
-This runs `ament_lint_auto` (copyright, cppcheck, cpplint, flake8, pep257, xmllint) and any additional tests.
+This runs `ament_lint_auto` (cppcheck, flake8, pep257, xmllint) and any additional tests. Copyright and formatting-only linters (copyright, cpplint, uncrustify) are skipped: the codebase predates them and a bulk reformat would obscure history.
 
 ## Architecture
 

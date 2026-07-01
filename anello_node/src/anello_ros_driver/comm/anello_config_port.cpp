@@ -90,12 +90,17 @@ void anello_config_port::init_uart()
                     this->uart_port.init(this->config.config_port_name, this->config.baud_rate);
                     char buf[100] = {0};
 
+                    // Drain whatever is already buffered on this port before
+                    // sending the probe; its contents (and any leftover from
+                    // a previous candidate) must not leak into the response
+                    // check below, and a read timeout leaves buf untouched.
                     this->uart_port.get_data(buf, 100, 10);
                     this->uart_port.write_data(command.c_str(), command.length());
                     usleep(500 * 1000);
-                    this->uart_port.get_data(buf, 100, 10);
+                    memset(buf, 0, sizeof(buf));
+                    size_t n = this->uart_port.get_data(buf, 100, 10);
 
-                    if (strstr(buf, "#APPNG") != nullptr)
+                    if (n > 0 && strstr(buf, "#APPNG") != nullptr)
                     {
                         port_found = true;
                         DEBUG_PRINT("Config port found: %s", port_name.c_str());

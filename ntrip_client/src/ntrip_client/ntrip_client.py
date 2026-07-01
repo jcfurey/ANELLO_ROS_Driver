@@ -110,6 +110,11 @@ class NTRIPClient:
         self.rtcm_timeout_seconds = self.DEFAULT_RTCM_TIMEOUT_SECONDS
 
     def connect(self):
+        # Drop any partial RTCM frame left over from a previous
+        # connection; it belongs to a dead TCP session and must not be
+        # spliced onto this one's stream.
+        self._rtcm_parser.reset()
+
         # Create a socket object that we will use to connect to the server
         self._server_socket = socket.socket(
             socket.AF_INET, socket.SOCK_STREAM
@@ -451,6 +456,9 @@ class NTRIPClient:
             size_token = self._chunk_buffer[:size_end].split(b';')[0].strip()
             try:
                 chunk_size = int(size_token, 16)
+                if chunk_size < 0:
+                    raise ValueError(
+                        'negative chunk size: {}'.format(chunk_size))
             except ValueError:
                 # Lost framing (e.g. mid-stream join): pass the buffer
                 # through so the RTCM parser can resync on the preamble.

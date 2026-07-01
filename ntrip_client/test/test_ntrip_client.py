@@ -58,3 +58,22 @@ def test_dechunk_passes_through_unframed_data():
     raw = b'\xd3\x00\x06 not chunked\r\n'
     out = client._dechunk(raw)
     assert out.startswith(b'\xd3')
+
+
+def test_dechunk_negative_chunk_size_passes_through():
+    # int(token, 16) accepts a signed token; a negative size must be
+    # treated as malformed framing (like a ValueError), not used to
+    # slice the buffer and silently emit corrupted bytes.
+    client = make_client()
+    raw = b'-5\r\nhello\r\n'
+    assert client._dechunk(raw) == raw
+
+
+def test_connect_resets_stale_rtcm_buffer():
+    # A partial RTCM frame left in the parser from a dead connection
+    # must not survive into the next connection's stream.
+    client = make_client()
+    client._rtcm_parser._buffer = b'stale-partial-frame'
+    client._host, client._port = '127.0.0.1', 1  # nothing listening: fails fast
+    assert client.connect() is False
+    assert client._rtcm_parser._buffer == b''
