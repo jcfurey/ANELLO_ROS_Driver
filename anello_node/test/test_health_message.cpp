@@ -175,6 +175,37 @@ TEST(HeadingHealth, AgreementAtSpeedStaysStable)
     EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
 }
 
+TEST(HeadingHealth, FogDisabledRotationStillGatesComparisons)
+{
+    health_message h;
+    // FOG disabled: every OG_WZ sample is exactly 0 (skipped, window
+    // never fills). The vehicle is turning at 15 deg/s on the MEMS
+    // gyro, so GNSS-vs-INS heading epochs lag and disagree — the
+    // rotation gate must fall back to the MEMS mean and suppress the
+    // comparison instead of tripping HEADING_UNSTABLE.
+    feed_imu(h, kFill, 15.0, 0.05, 0.0, 0.0);
+
+    for (int i = 0; i < 10; ++i) {
+        feed_gps(h, 5.0, 90.0, 0.5);
+        feed_ins(h, 0.0);
+    }
+    EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
+}
+
+TEST(HeadingHealth, FogDisabledStationaryMismatchStillTrips)
+{
+    health_message h;
+    // Same FOG-disabled unit, but not rotating: real mismatches must
+    // still be detected through the MEMS fallback gate.
+    feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.0);
+
+    for (int i = 0; i < 5; ++i) {
+        feed_gps(h, 5.0, 90.0, 0.5);
+        feed_ins(h, 0.0);
+    }
+    EXPECT_EQ(h.get_heading_status(), HEADING_UNSTABLE);
+}
+
 TEST(HeadingHealth, DualAntennaMismatchWithValidFlagsTrips)
 {
     health_message h;

@@ -308,19 +308,33 @@ void health_message::get_current_diff(double *gps_diff_out, double *hdg_diff_out
     return;
 }
 
+bool health_message::is_not_rotating() const
+{
+    // Rotation gate for the heading comparisons. Prefer the FOG mean,
+    // but with the FOG disabled its window never fills (exact-zero
+    // samples are skipped) and the average stays at 0.0 — gating on it
+    // would leave heading checks active during turns and trip spurious
+    // HEADING_UNSTABLE faults. Fall back to the MEMS mean, which
+    // always fills.
+    const double wz = this->fog_buffer_full
+        ? this->wz_fog_moving_average
+        : (this->buffer_full ? this->wz_mems_moving_average : 0.0);
+    return std::fabs(wz) < 5;
+}
+
 bool health_message::is_baseline_correct()
 {
     // With no configured baseline the comparison would always fail and
     // permanently disable the HDG-vs-INS heading check, so skip it.
     if (this->configured_baseline <= 0.0)
-        return (std::fabs(this->wz_fog_moving_average) < 5);
+        return this->is_not_rotating();
 
-    return (std::fabs(this->hdg_baseline - this->configured_baseline) < BASELINE_ACC_THRESHOLD) && (std::fabs(this->wz_fog_moving_average) < 5);
+    return (std::fabs(this->hdg_baseline - this->configured_baseline) < BASELINE_ACC_THRESHOLD) && this->is_not_rotating();
 }
 
 bool health_message::is_single_antenna_heading_valid()
 {
-    return (this->gps_heading_acc < GPS_HEADING_ACC_GOOD_THRESHOLD) && (std::fabs(this->wz_fog_moving_average) < 5);
+    return (this->gps_heading_acc < GPS_HEADING_ACC_GOOD_THRESHOLD) && this->is_not_rotating();
 }
 
 bool health_message::has_rtk_fix() const

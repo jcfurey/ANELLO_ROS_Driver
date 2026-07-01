@@ -11,6 +11,9 @@ from .nmea_parser import NMEAParser
 from .rtcm_parser import RTCMParser
 
 _CHUNK_SIZE = 1024
+# Cap on the HTTP response header block read during connect(); a real
+# caster's headers fit well inside this.
+_MAX_RESPONSE_HEADER_BYTES = 16 * 1024
 _SOURCETABLE_RESPONSES = [
     'SOURCETABLE 200 OK'
 ]
@@ -109,6 +112,10 @@ class NTRIPClient:
             self.DEFAULT_RECONNECT_ATTEMPT_WAIT_SECONDS
         self.rtcm_timeout_seconds = self.DEFAULT_RTCM_TIMEOUT_SECONDS
 
+    @property
+    def connected(self):
+        return self._connected
+
     def connect(self):
         # Drop any partial RTCM frame left over from a previous
         # connection; it belongs to a dead TCP session and must not be
@@ -131,21 +138,32 @@ class NTRIPClient:
             self._logerr('Exception: {}'.format(str(e)))
             return False
 
-        # If SSL, wrap the socket
+        # If SSL, wrap the socket. wrap_socket() performs the TLS
+        # handshake, so cert problems and handshake failures surface
+        # here — they must fail the connect (and let reconnect retry),
+        # not propagate and kill the node.
         if self.ssl:
-            # Configre the context based on the config
-            self._ssl_context = ssl.create_default_context()
-            if self.cert:
-                self._ssl_context.load_cert_chain(self.cert, self.key)
-            if self.ca_cert:
-                self._ssl_context.load_verify_locations(self.ca_cert)
+            try:
+                # Configre the context based on the config
+                self._ssl_context = ssl.create_default_context()
+                if self.cert:
+                    self._ssl_context.load_cert_chain(self.cert, self.key)
+                if self.ca_cert:
+                    self._ssl_context.load_verify_locations(self.ca_cert)
 
-            # Save the old socket for later just in case, and create
-            # a new SSL socket
-            self._raw_socket = self._server_socket
-            self._server_socket = self._ssl_context.wrap_socket(
-                self._raw_socket, server_hostname=self._host
-            )
+                # Save the old socket for later just in case, and create
+                # a new SSL socket
+                self._raw_socket = self._server_socket
+                self._server_socket = self._ssl_context.wrap_socket(
+                    self._raw_socket, server_hostname=self._host
+                )
+            except Exception as e:
+                self._logerr(
+                    'Unable to set up SSL connection to server at '
+                    'https://{}:{}'.format(self._host, self._port))
+                self._logerr('Exception: {}'.format(str(e)))
+                self.disconnect()
+                return False
 
         # Send the HTTP Request (sendall: a partial send() would
         # truncate the request and corrupt the caster session)
@@ -162,6 +180,18 @@ class NTRIPClient:
         response = ''
         try:
             raw_response = self._server_socket.recv(_CHUNK_SIZE)
+            # An HTTP/1.x header block ends with \r\n\r\n but may span
+            # several TCP segments; without the full block the
+            # Transfer-Encoding header can be missed and chunk framing
+            # would be fed to the RTCM parser. ICY responses may never
+            # send the terminator, so only real HTTP responses loop.
+            while (raw_response.startswith(b'HTTP/')
+                    and b'\r\n\r\n' not in raw_response
+                    and len(raw_response) < _MAX_RESPONSE_HEADER_BYTES):
+                more = self._server_socket.recv(_CHUNK_SIZE)
+                if not more:
+                    break
+                raw_response += more
         except Exception as e:
             self._logerr(
                 'Unable to read response from server at '
@@ -248,6 +278,15 @@ class NTRIPClient:
             self._logerr('Response: {}'.format(response))
             return False
         else:
+            # Fresh connection: the RTCM-timeout gate must stay disarmed
+            # until this connection delivers its first packet (a stale
+            # pre-reconnect timestamp would otherwise tear the new
+            # connection down immediately if the reconnect took longer
+            # than rtcm_timeout_seconds), and the failure counters
+            # belong to the dead connection.
+            self._first_rtcm_received = False
+            self._read_zero_bytes_count = 0
+            self._nmea_send_failed_count = 0
             self._loginfo(
                 'Connected to http://{}:{}/{}'.format(
                     self._host, self._port, self._mountpoint))

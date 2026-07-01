@@ -42,3 +42,12 @@ def test_over_length_rejected():
     parser = NMEAParser()
     long_body = 'GPGGA,' + '9' * 90
     assert not parser.is_valid_sentence(make_sentence(long_body))
+
+
+def test_non_hex_checksum_rejected_not_raised():
+    # A corrupted checksum field must be rejected, not raise ValueError
+    # out of the subscription callback (which would kill the node).
+    parser = NMEAParser()
+    assert not parser.is_valid_sentence('$GPGGA,fake*XX\r\n')
+    assert not parser.is_valid_sentence('$GPGGA,fake*\r\n')
+    assert not parser.is_valid_sentence('$GPGGA,fake*-1\r\n')

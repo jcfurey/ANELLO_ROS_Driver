@@ -116,6 +116,7 @@ class NTRIPRos(Node):
         self._nmea_min_interval = \
             self.get_parameter('nmea_min_interval_seconds').value
         self._last_nmea_send = None
+        self._next_connect_attempt = None
 
     def run(self):
         if not self._client.connect():
@@ -143,10 +144,40 @@ class NTRIPRos(Node):
         ):
             return
         self._last_nmea_send = now
-        self._client.send_nmea(nmea.sentence)
+        try:
+            self._client.send_nmea(nmea.sentence)
+        except Exception as e:
+            # send_nmea can raise through reconnect() exhaustion; a
+            # callback exception would kill the node. publish_rtcm's
+            # recovery path re-establishes the connection.
+            self.get_logger().error(
+                'Failed to send NMEA to the NTRIP server: {}'.format(e))
 
     def publish_rtcm(self):
-        for packet in self._client.recv_rtcm():
+        # A lost caster must not be fatal: when the client is
+        # disconnected (e.g. reconnect() exhausted its attempts and
+        # raised), keep retrying at the reconnect cadence so
+        # corrections resume when the caster comes back.
+        if not self._client.connected:
+            now = time.monotonic()
+            if (
+                self._next_connect_attempt is not None
+                and now < self._next_connect_attempt
+            ):
+                return
+            self._next_connect_attempt = \
+                now + self._client.reconnect_attempt_wait_seconds
+            self.get_logger().info('Attempting to reconnect to the NTRIP server')
+            if not self._client.connect():
+                return
+        try:
+            packets = self._client.recv_rtcm()
+        except Exception as e:
+            self.get_logger().error(
+                'Lost connection to the NTRIP server, will keep '
+                'retrying: {}'.format(e))
+            return
+        for packet in packets:
             rtcm_msg = RTCM(
                 header=Header(
                     stamp=self.get_clock().now().to_msg(),

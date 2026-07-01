@@ -90,6 +90,7 @@ private:
     bool has_rtk_fix() const;
     bool has_gyro_discrepancy() const;
     bool has_good_gps_accuracy() const;
+    bool is_not_rotating() const;
 
     void get_current_diff(double *gps_diff, double *hdg_diff);
 
