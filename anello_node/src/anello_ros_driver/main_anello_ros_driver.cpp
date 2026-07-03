@@ -249,7 +249,9 @@ private:
         // manual's example APIMU capture shows AZ = +1 g upright, which
         // would make every published axis inverted. Bench check: with the
         // vehicle stationary, imu/data linear_acceleration.z must read
-        // +9.8; if it reads -9.8, set this parameter true.
+        // +9.8; if it reads -9.8, set this parameter true. check_accel_sign()
+        // performs this check automatically at startup and warns once if a
+        // stationary, level unit is publishing inverted gravity.
         declare_parameter("flip_accel_sign", false,
             d("Negate all linear acceleration axes in imu/data and "
               "imu/data_raw. Use when a stationary unit reports -9.8 "
@@ -906,7 +908,69 @@ private:
         msg.orientation_covariance[0] = -1.0;
         fill_imu_body_measurements(msg, imu);
 
+        check_accel_sign(imu);
+
         pub_ros_imu_raw_->publish(msg);
+    }
+
+    // One-shot startup sanity check for the accelerometer sign convention.
+    // When a stationary, roughly level unit is detected, confirm the
+    // published linear_acceleration.z points up (+g). If it comes out
+    // negative the gravity vector is inverted (see the flip_accel_sign
+    // parameter): warn loudly once so the misconfiguration is caught on
+    // real hardware. Purely diagnostic — never alters the published data.
+    void check_accel_sign(const ImuCache &imu)
+    {
+        if (accel_sign_checked_) return;
+
+        // Bound the search: if the unit never settles (e.g. it powers up
+        // already moving), give up quietly rather than warn spuriously.
+        constexpr int kMaxSamples = 4000;      // ~20-40 s at 100-200 Hz
+        constexpr int kRunNeeded = 50;         // consecutive stationary samples
+        constexpr double kGyroStationaryDps = 1.0;
+        if (++accel_check_samples_ > kMaxSamples) {
+            accel_sign_checked_ = true;
+            RCLCPP_DEBUG(get_logger(),
+                "Accel-sign self-check skipped: unit not stationary/level "
+                "at startup");
+            return;
+        }
+
+        // Raw accel is in g, raw gyro in deg/s.
+        const double gmag = std::sqrt(imu.ax * imu.ax + imu.ay * imu.ay +
+                                      imu.az * imu.az);
+        const double wmag = std::sqrt(imu.wx * imu.wx + imu.wy * imu.wy +
+                                      imu.wz * imu.wz);
+        const bool stationary =
+            wmag < kGyroStationaryDps && gmag > 0.85 && gmag < 1.15;
+        // Level enough that gravity lands mostly on the z axis, so its sign
+        // is meaningful (within ~25 deg of level). A tilted stationary mount
+        // is ambiguous for this simple test, so it resets the run.
+        const bool level = std::fabs(imu.az) > 0.9 * gmag;
+        if (!(stationary && level)) {
+            accel_stationary_run_ = 0;
+            accel_z_flu_sum_ = 0.0;
+            return;
+        }
+
+        const double accel_sign = flip_accel_sign_ ? -1.0 : 1.0;
+        accel_z_flu_sum_ += accel_sign * -imu.az * kGAccel;  // published FLU z
+        if (++accel_stationary_run_ < kRunNeeded) return;
+
+        accel_sign_checked_ = true;
+        const double mean_z = accel_z_flu_sum_ / accel_stationary_run_;
+        if (mean_z < 0.0) {
+            RCLCPP_WARN(get_logger(),
+                "imu/data gravity looks inverted: a stationary, level unit is "
+                "publishing linear_acceleration.z = %.2f m/s^2 (a level IMU "
+                "should read +%.2f per REP-145). Set the 'flip_accel_sign' "
+                "parameter to %s to correct all three acceleration axes.",
+                mean_z, kGAccel, flip_accel_sign_ ? "false" : "true");
+        } else {
+            RCLCPP_DEBUG(get_logger(),
+                "Accel-sign self-check OK: stationary level unit reads "
+                "linear_acceleration.z = +%.2f m/s^2", mean_z);
+        }
     }
 
     void store_last_cov(const double val[])
@@ -1264,6 +1328,15 @@ private:
     CovCache cov_cache_;
     bool cov_received_ = false;
     bool cov_scale_warned_ = false;
+
+    // One-shot accelerometer-sign self-check state. The device's at-rest
+    // accel sign is not in the public manual (see flip_accel_sign); this
+    // watches a stationary, level unit at startup and warns once if the
+    // published gravity looks inverted, without changing any output.
+    bool accel_sign_checked_ = false;
+    int accel_check_samples_ = 0;      // total IMU samples observed
+    int accel_stationary_run_ = 0;     // consecutive stationary+level samples
+    double accel_z_flu_sum_ = 0.0;     // sum of published FLU z over the run
 
     // Local ENU origin for /odom, anchored at the first valid INS fix
     bool odom_origin_set_ = false;
