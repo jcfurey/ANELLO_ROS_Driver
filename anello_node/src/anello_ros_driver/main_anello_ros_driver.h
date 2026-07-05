@@ -175,4 +175,11 @@ struct rtcm_apcov_t
 
 #pragma pack(pop)
 
+namespace anello
+{
+// Factory for the standalone executable (see standalone_main.cpp): builds
+// the driver node so main() can spin it under a MultiThreadedExecutor.
+rclcpp::Node::SharedPtr make_anello_driver(const rclcpp::NodeOptions &options);
+}  // namespace anello
+
 #endif

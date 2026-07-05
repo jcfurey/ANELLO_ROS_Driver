@@ -176,6 +176,16 @@ public:
     {
         declare_all_parameters();
         read_parameters();
+        // The send_cmd service and the APODO subscription both drive the
+        // UART config port and can block up to ~500 ms waiting on the
+        // device. Put them in their own mutually-exclusive group so, under
+        // the MultiThreadedExecutor in main(), they run concurrently with —
+        // and never stall — the data poll / publish path (the node's
+        // default group, the sole accessor of the data port and the
+        // decode/health state). The two groups share no mutable state, so
+        // this remains race-free even under a single-threaded executor.
+        config_cb_group_ = create_callback_group(
+            rclcpp::CallbackGroupType::MutuallyExclusive);
         setup_ports();
         setup_publishers();
         setup_subscribers();
@@ -193,9 +203,14 @@ private:
     // ── Parameter declaration ──────────────────────────────────────────
     void declare_all_parameters()
     {
+        // Every parameter is read once in read_parameters() and never
+        // re-read (there is no on_set_parameters callback), so mark them
+        // read_only: a runtime `ros2 param set` then fails loudly instead
+        // of silently having no effect.
         auto d = [](const std::string &desc) {
             rcl_interfaces::msg::ParameterDescriptor pd;
             pd.description = desc;
+            pd.read_only = true;
             return pd;
         };
 
@@ -226,18 +241,27 @@ private:
             d("Frame ID for dual-antenna heading messages"));
 
         declare_parameter("publish_tf", true,
-            d("Publish TF transform from odom to ins_link"));
+            d("Publish the tf_parent_frame -> tf_child_frame transform"));
         declare_parameter("tf_parent_frame", "odom",
-            d("Parent frame for TF broadcast"));
+            d("Parent frame for the TF broadcast (REP-105 odom)"));
+        declare_parameter("tf_child_frame", "base_link",
+            d("Child frame for the TF broadcast and /odom child_frame_id. "
+              "REP-105 makes the moving odom child base_link, with the "
+              "sensor frames (ins_link, imu_link) as its static URDF "
+              "children — publishing odom->ins_link directly gives ins_link "
+              "two parents. Set to ins_link to restore the legacy behavior "
+              "when no URDF parents ins_link."));
 
         declare_parameter("poll_interval_ms", 5,
             d("Main loop polling interval in milliseconds"));
 
-        declare_parameter("timestamp_source", "arrival",
-            d("Header stamp source: 'arrival' = host time at the port "
-              "read (default); 'mcu' = device MCU time translated to host "
-              "time with a minimum-offset filter, eliminating serial/OS "
-              "arrival jitter from inter-message timing"));
+        declare_parameter("timestamp_source", "mcu",
+            d("Header stamp source: 'mcu' (default) = device MCU time "
+              "translated to host time with a minimum-offset filter, "
+              "eliminating serial/OS arrival jitter from inter-message "
+              "timing (warms up on arrival stamps first); 'arrival' = host "
+              "time captured once per port read, shared by every message in "
+              "that read"));
 
         declare_parameter("heading_baseline", 0.0,
             d("Dual-antenna baseline length in meters, used to validate the "
@@ -249,7 +273,9 @@ private:
         // manual's example APIMU capture shows AZ = +1 g upright, which
         // would make every published axis inverted. Bench check: with the
         // vehicle stationary, imu/data linear_acceleration.z must read
-        // +9.8; if it reads -9.8, set this parameter true.
+        // +9.8; if it reads -9.8, set this parameter true. check_accel_sign()
+        // performs this check automatically at startup and warns once if a
+        // stationary, level unit is publishing inverted gravity.
         declare_parameter("flip_accel_sign", false,
             d("Negate all linear acceleration axes in imu/data and "
               "imu/data_raw. Use when a stationary unit reports -9.8 "
@@ -296,7 +322,14 @@ private:
         frame_hdg_ = get_parameter("frame_id.hdg").as_string();
         publish_tf_ = get_parameter("publish_tf").as_bool();
         tf_parent_ = get_parameter("tf_parent_frame").as_string();
+        tf_child_ = get_parameter("tf_child_frame").as_string();
         poll_ms_ = get_parameter("poll_interval_ms").as_int();
+        if (poll_ms_ < 1) {
+            RCLCPP_WARN(get_logger(),
+                "poll_interval_ms=%ld is invalid (0 ms busy-spins the executor, "
+                "negative is rejected by the timer); clamping to 1 ms", poll_ms_);
+            poll_ms_ = 1;
+        }
         health_msg_.set_baseline(get_parameter("heading_baseline").as_double());
         use_fog_wz_ = get_parameter("use_fog_wz").as_bool();
         flip_accel_sign_ = get_parameter("flip_accel_sign").as_bool();
@@ -381,7 +414,11 @@ private:
         pub_gp2_ = create_publisher<anello_interfaces::msg::APGPS>("anello/gps2", sensor_qos);
         pub_hdg_ = create_publisher<anello_interfaces::msg::APHDG>("anello/hdg", sensor_qos);
         pub_cov_ = create_publisher<anello_interfaces::msg::APCOV>("anello/cov", sensor_qos);
-        pub_health_ = create_publisher<anello_interfaces::msg::APHEALTH>("anello/health", 1);
+        // Reliable + transient_local (depth 1): a late-joining monitor
+        // immediately latches the last published health instead of waiting
+        // up to a second for the next 1 Hz tick.
+        pub_health_ = create_publisher<anello_interfaces::msg::APHEALTH>(
+            "anello/health", rclcpp::QoS(1).reliable().transient_local());
         pub_gga_ = create_publisher<nmea_msgs::msg::Sentence>("ntrip_client/nmea", 1);
 
         pub_ros_imu_ = create_publisher<sensor_msgs::msg::Imu>("imu/data", sensor_qos);
@@ -394,10 +431,13 @@ private:
     // ── Subscribers ────────────────────────────────────────────────────
     void setup_subscribers()
     {
-        // SensorDataQoS (best-effort) to match the NTRIP client's publisher;
-        // a reliable subscription would not connect to a best-effort publisher.
+        // RTCM corrections are low-rate and delivery-critical: a dropped
+        // frame delays RTK reconvergence. Use RELIABLE (depth 10) so
+        // transient DDS congestion or a busy executor cannot silently drop
+        // corrections. The NTRIP client publishes RELIABLE to match; the
+        // KEEP_LAST depth bounds memory.
         sub_rtcm_ = create_subscription<rtcm_msgs::msg::Message>(
-            "ntrip_client/rtcm", rclcpp::SensorDataQoS(),
+            "ntrip_client/rtcm", rclcpp::QoS(10).reliable(),
             [this](const rtcm_msgs::msg::Message::SharedPtr msg) {
                 if (data_port_)
                     data_port_->write_data(
@@ -405,6 +445,10 @@ private:
                         msg->message.size());
             });
 
+        // APODO drives the config port (serial mode), so it shares the
+        // config callback group with the send_cmd service.
+        rclcpp::SubscriptionOptions odo_opts;
+        odo_opts.callback_group = config_cb_group_;
         sub_odo_ = create_subscription<anello_interfaces::msg::APODO>(
             "anello/odo", 1,
             [this](const anello_interfaces::msg::APODO::SharedPtr msg) {
@@ -417,18 +461,22 @@ private:
                     odo_eth_port_->write_data(full.c_str(), full.length());
                 else if (config_port_)
                     config_port_->write_data(full.c_str(), full.length());
-            });
+            },
+            odo_opts);
     }
 
     // ── Services ───────────────────────────────────────────────────────
     void setup_services()
     {
+        // Runs in the config callback group (see the constructor): the
+        // ~500 ms device-response wait must not stall the data poll.
         srv_cmd_ = create_service<anello_interfaces::srv::CmdAndRsp>(
             "anello/send_cmd",
             [this](const std::shared_ptr<anello_interfaces::srv::CmdAndRsp::Request> req,
                    std::shared_ptr<anello_interfaces::srv::CmdAndRsp::Response> res) {
                 send_command_callback(req, res);
-            });
+            },
+            rclcpp::ServicesQoS(), config_cb_group_);
     }
 
     void send_command_callback(
@@ -500,7 +548,7 @@ private:
         geometry_msgs::msg::TransformStamped t;
         t.header.stamp = stamp;
         t.header.frame_id = tf_parent_;
-        t.child_frame_id = frame_ins_;
+        t.child_frame_id = tf_child_;
 
         // Same translation as the /odom pose for this INS message (zero
         // until the odom origin anchors): TF and /odom describe the same
@@ -712,7 +760,7 @@ private:
                 else if (num >= 14 && strstr(val[0], "APINS") != nullptr)
                 {
                     decode_ascii_ins(val, decoded_val);
-                    auto stamp = stamp_from_mcu(decoded_val[0]);
+                    auto stamp = monotonic_ins_stamp(stamp_from_mcu(decoded_val[0]));
                     publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
                     health_msg_.add_ins_message(decoded_val);
                     publish_ros_imu_and_nav(decoded_val, stamp);
@@ -764,6 +812,24 @@ private:
             }
         }
         return read_buf_.stamp;
+    }
+
+    // TF requires strictly-increasing stamps per frame. In 'arrival' mode
+    // every message decoded from one port read shares the same host stamp,
+    // so two INS frames in a single read would broadcast odom->ins_link
+    // twice with an identical stamp (tf2 drops the second as
+    // TF_REPEATED_DATA); in 'mcu' mode a settling clock offset can step a
+    // stamp backward (TF_OLD_DATA). Nudge a non-increasing INS stamp
+    // forward by 1 ns so /odom, ins/fix, imu/data and the TF — which all
+    // share this stamp — stay monotonic and consistent.
+    rclcpp::Time monotonic_ins_stamp(const rclcpp::Time &stamp)
+    {
+        if (ins_stamp_valid_ && stamp <= last_ins_stamp_)
+            last_ins_stamp_ = last_ins_stamp_ + rclcpp::Duration(0, 1);
+        else
+            last_ins_stamp_ = stamp;  // first call also adopts the clock type
+        ins_stamp_valid_ = true;
+        return last_ins_stamp_;
     }
 
     // ── RTCM handler ──────────────────────────────────────────────────
@@ -826,7 +892,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apins_t)))
                 return false;
             decode_rtcm_ins_msg(decoded_val, a1buff_);
-            stamp = stamp_from_mcu(decoded_val[0]);
+            stamp = monotonic_ins_stamp(stamp_from_mcu(decoded_val[0]));
             publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
             health_msg_.add_ins_message(decoded_val);
             publish_ros_imu_and_nav(decoded_val, stamp);
@@ -906,7 +972,69 @@ private:
         msg.orientation_covariance[0] = -1.0;
         fill_imu_body_measurements(msg, imu);
 
+        check_accel_sign(imu);
+
         pub_ros_imu_raw_->publish(msg);
+    }
+
+    // One-shot startup sanity check for the accelerometer sign convention.
+    // When a stationary, roughly level unit is detected, confirm the
+    // published linear_acceleration.z points up (+g). If it comes out
+    // negative the gravity vector is inverted (see the flip_accel_sign
+    // parameter): warn loudly once so the misconfiguration is caught on
+    // real hardware. Purely diagnostic — never alters the published data.
+    void check_accel_sign(const ImuCache &imu)
+    {
+        if (accel_sign_checked_) return;
+
+        // Bound the search: if the unit never settles (e.g. it powers up
+        // already moving), give up quietly rather than warn spuriously.
+        constexpr int kMaxSamples = 4000;      // ~20-40 s at 100-200 Hz
+        constexpr int kRunNeeded = 50;         // consecutive stationary samples
+        constexpr double kGyroStationaryDps = 1.0;
+        if (++accel_check_samples_ > kMaxSamples) {
+            accel_sign_checked_ = true;
+            RCLCPP_DEBUG(get_logger(),
+                "Accel-sign self-check skipped: unit not stationary/level "
+                "at startup");
+            return;
+        }
+
+        // Raw accel is in g, raw gyro in deg/s.
+        const double gmag = std::sqrt(imu.ax * imu.ax + imu.ay * imu.ay +
+                                      imu.az * imu.az);
+        const double wmag = std::sqrt(imu.wx * imu.wx + imu.wy * imu.wy +
+                                      imu.wz * imu.wz);
+        const bool stationary =
+            wmag < kGyroStationaryDps && gmag > 0.85 && gmag < 1.15;
+        // Level enough that gravity lands mostly on the z axis, so its sign
+        // is meaningful (within ~25 deg of level). A tilted stationary mount
+        // is ambiguous for this simple test, so it resets the run.
+        const bool level = std::fabs(imu.az) > 0.9 * gmag;
+        if (!(stationary && level)) {
+            accel_stationary_run_ = 0;
+            accel_z_flu_sum_ = 0.0;
+            return;
+        }
+
+        const double accel_sign = flip_accel_sign_ ? -1.0 : 1.0;
+        accel_z_flu_sum_ += accel_sign * -imu.az * kGAccel;  // published FLU z
+        if (++accel_stationary_run_ < kRunNeeded) return;
+
+        accel_sign_checked_ = true;
+        const double mean_z = accel_z_flu_sum_ / accel_stationary_run_;
+        if (mean_z < 0.0) {
+            RCLCPP_WARN(get_logger(),
+                "imu/data gravity looks inverted: a stationary, level unit is "
+                "publishing linear_acceleration.z = %.2f m/s^2 (a level IMU "
+                "should read +%.2f per REP-145). Set the 'flip_accel_sign' "
+                "parameter to %s to correct all three acceleration axes.",
+                mean_z, kGAccel, flip_accel_sign_ ? "false" : "true");
+        } else {
+            RCLCPP_DEBUG(get_logger(),
+                "Accel-sign self-check OK: stationary level unit reads "
+                "linear_acceleration.z = +%.2f m/s^2", mean_z);
+        }
     }
 
     void store_last_cov(const double val[])
@@ -1047,7 +1175,7 @@ private:
         auto odom = nav_msgs::msg::Odometry();
         odom.header.stamp = stamp;
         odom.header.frame_id = tf_parent_;
-        odom.child_frame_id = frame_ins_;
+        odom.child_frame_id = tf_child_;
 
         const double lat = ins[3], lon = ins[4], alt = ins[5];
         if (!odom_origin_set_ && position_valid &&
@@ -1236,6 +1364,7 @@ private:
 
     // Diagnostics
     std::unique_ptr<diagnostic_updater::Updater> diag_updater_;
+    rclcpp::CallbackGroup::SharedPtr config_cb_group_;
 
     // Timers
     rclcpp::TimerBase::SharedPtr timer_;
@@ -1245,12 +1374,13 @@ private:
     std::string frame_imu_, frame_ins_, frame_gnss_, frame_hdg_;
     bool publish_tf_ = true;
     std::string tf_parent_;
+    std::string tf_child_;
     int64_t poll_ms_ = 5;
     bool use_fog_wz_ = true;
     bool flip_accel_sign_ = false;
     double ang_vel_cov_[3] = {};
     double lin_acc_cov_[3] = {};
-    std::string timestamp_source_ = "arrival";
+    std::string timestamp_source_ = "mcu";
     bool use_mcu_stamp_ = false;
     ClockTranslator clock_translator_;
 
@@ -1265,6 +1395,20 @@ private:
     bool cov_received_ = false;
     bool cov_scale_warned_ = false;
 
+    // One-shot accelerometer-sign self-check state. The device's at-rest
+    // accel sign is not in the public manual (see flip_accel_sign); this
+    // watches a stationary, level unit at startup and warns once if the
+    // published gravity looks inverted, without changing any output.
+    bool accel_sign_checked_ = false;
+    int accel_check_samples_ = 0;      // total IMU samples observed
+    int accel_stationary_run_ = 0;     // consecutive stationary+level samples
+    double accel_z_flu_sum_ = 0.0;     // sum of published FLU z over the run
+
+    // Last INS stamp broadcast on TF / shared by odom, ins/fix, imu/data;
+    // kept to guarantee strictly-increasing stamps (see monotonic_ins_stamp).
+    rclcpp::Time last_ins_stamp_;
+    bool ins_stamp_valid_ = false;
+
     // Local ENU origin for /odom, anchored at the first valid INS fix
     bool odom_origin_set_ = false;
     double odom_ref_lat_ = 0.0, odom_ref_lon_ = 0.0, odom_ref_alt_ = 0.0;
@@ -1272,6 +1416,11 @@ private:
     double odom_m_per_deg_lon_ = 111319.0;
     double odom_pos_enu_[3] = {};  // last anchored ENU position, for TF
 };
+
+rclcpp::Node::SharedPtr make_anello_driver(const rclcpp::NodeOptions &options)
+{
+    return std::make_shared<AnelloRosDriver>(options);
+}
 
 } // namespace anello
 

@@ -54,8 +54,31 @@ Robot Computer ──Ethernet──> ANELLO EVK
   (local IP)                 (192.168.1.111 default)
 ```
 
-For Ethernet, the ANELLO unit must be configured with your computer's IP
-address as its "Computer IP" target. Refer to the ANELLO Developer Manual.
+**Configure the unit first (ANELLO user tool).** The driver reads whatever
+the unit streams — it does *not* set the unit's output format, rate, or baud,
+so those must be configured before launch. Use ANELLO's official Python
+configuration tool over USB:
+
+```bash
+git clone https://github.com/Anello-Photonics/user_tool.git
+cd user_tool
+pip install -r requirements.txt
+python board_tools/user_program.py
+```
+
+In the tool: **Connect → COM** (it auto-detects the config port), then
+**Unit Configuration**. For a serial/USB robot integration, set at least:
+
+| Tool menu name | Code | Value for a typical robot |
+|---|---|---|
+| Message Format | `mfm` | `4` (RTCM binary — compact, full rate; `1`/ASCII is for reading by eye) |
+| Output Data Rate (Hz) | `odr` | `100`, or `200` if the link can carry it |
+| Serial (UART) baud | — | must equal the driver's `baud_rate` param; use `921600` to sustain 200 Hz (230400 tops out near ~50 Hz ASCII / 100 Hz RTCM) |
+
+Save to flash and reset the unit — `odr` and baud changes only take effect
+after a reset. For the full **Ethernet** personality (static IP, `rip`/`lip`,
+UDP ports), use the same tool as detailed in
+[Ethernet Setup Guide §4](ethernet_setup_guide.md#4-one-time-unit-configuration-anello-user-tool).
 
 ### 1.2 USB Permissions
 
@@ -293,9 +316,31 @@ the `xyz` and `rpy` values to match your physical mounting:
 
 ### 4.2 TF Tree
 
-The driver publishes a transform from `odom` -> `ins_link` by default. In a
-typical setup with `robot_localization`, you want the driver's TF disabled
-and let `robot_localization` handle the full TF tree:
+By default the driver publishes `odom` -> `base_link` (`tf_parent_frame` ->
+`tf_child_frame`), the moving edge REP-105 expects, with the sensor frames
+hanging off `base_link` as static URDF children:
+
+```
+odom ──(driver, dynamic)──> base_link
+                              |
+                         (static, URDF)
+                              |
+                          imu_link
+                          gnss_link
+                          ins_link
+```
+
+> **Important:** the driver estimates the pose of the INS reference point.
+> Publishing `odom -> base_link` treats the INS as coincident with
+> `base_link`; for a rigidly-mounted unit the lever arm is small, but if you
+> need it exact, mount the unit at the body origin or account for the offset.
+> Do **not** set `tf_child_frame:=ins_link` while your URDF also parents
+> `ins_link` (e.g. `imu_link -> ins_link` above) — that gives `ins_link` two
+> parents, which tf2 forbids. Use `base_link` (default), or drop the URDF
+> joint that parents `ins_link`.
+
+With `robot_localization` (Section 5), disable the driver's TF entirely and
+let the EKF own `odom -> base_link`:
 
 ```
 map ──(robot_localization)--> odom ──(robot_localization)--> base_link
@@ -334,8 +379,9 @@ types that `robot_localization` expects.
 EKF, so there are two supported ways to use it — don't mix them:
 
 1. **Trust the INS (simplest):** use `ins/fix` and the driver's
-   `odom -> ins_link` TF directly as your global estimate, with no second
-   EKF. Best when the ANELLO is your only localization sensor.
+   `odom -> base_link` TF directly as your global estimate, with no second
+   EKF. This is the `odom -> base_link` edge Nav2 requires. Best when the
+   ANELLO is your only localization sensor.
 2. **Re-fuse raw data (this section):** feed `imu/data` + `gps/fix` into
    `ekf_node` + `navsat_transform_node`, as configured below. In this
    topology do **not** also fuse `ins/fix`, and launch the driver with
