@@ -79,7 +79,10 @@ class NTRIPRos(Node):
 
         self._rtcm_frame_id = self.get_parameter('rtcm_frame_id').value
 
-        rtcm_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        # RTCM corrections are low-rate and delivery-critical: publish
+        # RELIABLE (KEEP_LAST depth 10) so a dropped frame cannot silently
+        # delay RTK reconvergence. The driver subscribes RELIABLE to match.
+        rtcm_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._rtcm_pub = self.create_publisher(RTCM, 'ntrip_client/rtcm', rtcm_qos)
 
         self._client = NTRIPClient(

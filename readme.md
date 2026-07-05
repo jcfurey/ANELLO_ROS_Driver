@@ -137,8 +137,9 @@ All parameters can be set via the launch file or on the command line.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `publish_tf` | `true` | Publish TF transform from parent frame to `ins_link` |
+| `publish_tf` | `true` | Publish the `tf_parent_frame` → `tf_child_frame` transform |
 | `tf_parent_frame` | `odom` | Parent frame for TF broadcast |
+| `tf_child_frame` | `base_link` | Child frame for the TF broadcast and `/odom` `child_frame_id`. REP-105 makes the moving `odom` child `base_link` (with `ins_link`/`imu_link` as static URDF children); set `ins_link` for the legacy `odom → ins_link` behavior when no URDF parents `ins_link` |
 
 #### Polling
 
@@ -150,7 +151,7 @@ All parameters can be set via the launch file or on the command line.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `timestamp_source` | `arrival` | `arrival` = host time captured at the port read. `mcu` = device MCU time translated to host time with a minimum-offset filter (Olson, IROS 2010): inter-message timing then follows the device clock instead of carrying serial/OS arrival jitter (sub-ms typical, multi-ms outliers). The translated stamps keep a small constant offset (≈ the minimum link latency); the raw `mcu_time`/`gps_time` fields remain in every `anello/*` message for offline use |
+| `timestamp_source` | `mcu` | `mcu` (default) = device MCU time translated to host time with a minimum-offset filter (Olson, IROS 2010): inter-message timing follows the device clock instead of carrying serial/OS arrival jitter (sub-ms typical, multi-ms outliers), and it warms up on arrival stamps first. `arrival` = host time captured once per port read and shared by every message in that read. The translated `mcu` stamps keep a small constant offset (≈ the minimum link latency); the raw `mcu_time`/`gps_time` fields remain in every `anello/*` message for offline use |
 
 Timestamping tips: at 230400 baud a full message spends 4–5 ms on the
 wire — prefer 921600 baud or UDP when stamp latency matters. With FTDI
@@ -227,7 +228,7 @@ All custom messages include a `std_msgs/Header` with timestamp and frame ID. Mes
 | `imu/data` | `sensor_msgs/Imu` | Same as `imu/data_raw` plus the INS orientation quaternion, published at the INS rate |
 | `gps/fix` | `sensor_msgs/NavSatFix` | Raw GNSS fix from APGPS (4 Hz), covariance approximated from the receiver accuracy estimates. Feed this (not `ins/fix`) to `navsat_transform_node` — fusing the INS position back in would double-count the IMU |
 | `ins/fix` | `sensor_msgs/NavSatFix` | INS-fused position at the INS rate, with the full EKF covariance from APCOV when available |
-| `odom` | `nav_msgs/Odometry` | INS solution at the INS rate: pose in a local ENU frame anchored at the first valid fix (frame `tf_parent_frame` → `frame_id.ins`), twist in the body (FLU) frame. Pose covariance from APCOV position/orientation; twist linear covariance from the APCOV velocity covariance rotated into the body frame; angular covariance from the `covariance.angular_velocity` parameter |
+| `odom` | `nav_msgs/Odometry` | INS solution at the INS rate: pose in a local ENU frame anchored at the first valid fix (frame `tf_parent_frame` → `tf_child_frame`), twist in the body (FLU) frame. Pose covariance from APCOV position/orientation; twist linear covariance from the APCOV velocity covariance rotated into the body frame; angular covariance from the `covariance.angular_velocity` parameter |
 | `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA sentence forwarded to NTRIP caster |
 
 **Frame conventions:** the `anello/*` custom topics carry values in the

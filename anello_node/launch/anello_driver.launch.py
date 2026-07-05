@@ -39,9 +39,15 @@ def generate_launch_description():
 
         # ── TF ──
         DeclareLaunchArgument('publish_tf', default_value='true',
-                              description='Publish TF from odom to ins_link'),
+                              description='Publish the tf_parent_frame -> '
+                                          'tf_child_frame transform'),
         DeclareLaunchArgument('tf_parent_frame', default_value='odom',
                               description='Parent frame for TF broadcast'),
+        DeclareLaunchArgument('tf_child_frame', default_value='base_link',
+                              description='Child frame for TF broadcast and '
+                                          '/odom child_frame_id (REP-105 '
+                                          'base_link; set ins_link for legacy '
+                                          'behavior)'),
 
         # ── Polling ──
         DeclareLaunchArgument('poll_interval_ms', default_value='5',
@@ -87,6 +93,7 @@ def generate_launch_description():
                 'frame_id.hdg': LaunchConfiguration('frame_id_hdg'),
                 'publish_tf': LaunchConfiguration('publish_tf'),
                 'tf_parent_frame': LaunchConfiguration('tf_parent_frame'),
+                'tf_child_frame': LaunchConfiguration('tf_child_frame'),
                 'poll_interval_ms': LaunchConfiguration('poll_interval_ms'),
                 'heading_baseline': LaunchConfiguration('heading_baseline'),
             }],

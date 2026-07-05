@@ -51,15 +51,32 @@ target_link_libraries(anello_ros_driver_component PUBLIC
   tf2_ros::tf2_ros
   diagnostic_updater::diagnostic_updater
 )
-rclcpp_components_register_node(anello_ros_driver_component
-  PLUGIN "anello::AnelloRosDriver"
-  EXECUTABLE anello_ros_driver_node
+# Register for component loading without generating an executable (the
+# plural macro); the standalone executable below provides its own main().
+rclcpp_components_register_nodes(anello_ros_driver_component
+  "anello::AnelloRosDriver"
+)
+
+# Standalone executable with a custom main() that spins under a
+# MultiThreadedExecutor (the generated component executable would use a
+# SingleThreadedExecutor, which cannot run the config callback group in
+# parallel with the data poll). The node stays loadable as a component too.
+add_executable(anello_ros_driver_node
+  src/anello_ros_driver/standalone_main.cpp
+)
+target_link_libraries(anello_ros_driver_node
+  anello_ros_driver_component
+  rclcpp::rclcpp
 )
 
 install(TARGETS anello_ros_driver_component
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
+)
+
+install(TARGETS anello_ros_driver_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
