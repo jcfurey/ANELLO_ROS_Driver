@@ -375,13 +375,19 @@ auto sub2 = node->create_subscription<anello_interfaces::msg::APINS>(
 ```python
 from sensor_msgs.msg import Imu, NavSatFix
 from anello_interfaces.msg import APINS
+from rclpy.qos import qos_profile_sensor_data
 
-# Standard messages work with any ROS2 tool
-self.create_subscription(Imu, 'imu/data', self.imu_callback, 10)
-self.create_subscription(NavSatFix, 'gps/fix', self.gps_callback, 10)
+# The driver publishes the sensor streams with SensorDataQoS (best effort).
+# A subscription must also be best effort or it will silently never connect
+# — a plain depth (e.g. 10) is RELIABLE and will not match these publishers.
+self.create_subscription(Imu, 'imu/data', self.imu_callback,
+                         qos_profile_sensor_data)
+self.create_subscription(NavSatFix, 'gps/fix', self.gps_callback,
+                         qos_profile_sensor_data)
 
-# ANELLO-specific messages provide additional fields
-self.create_subscription(APINS, 'anello/ins', self.ins_callback, 10)
+# ANELLO-specific messages provide additional fields (also SensorDataQoS)
+self.create_subscription(APINS, 'anello/ins', self.ins_callback,
+                         qos_profile_sensor_data)
 ```
 
 ## Testing

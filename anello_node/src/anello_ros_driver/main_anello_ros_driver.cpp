@@ -299,6 +299,12 @@ private:
         publish_tf_ = get_parameter("publish_tf").as_bool();
         tf_parent_ = get_parameter("tf_parent_frame").as_string();
         poll_ms_ = get_parameter("poll_interval_ms").as_int();
+        if (poll_ms_ < 1) {
+            RCLCPP_WARN(get_logger(),
+                "poll_interval_ms=%ld is invalid (0 ms busy-spins the executor, "
+                "negative is rejected by the timer); clamping to 1 ms", poll_ms_);
+            poll_ms_ = 1;
+        }
         health_msg_.set_baseline(get_parameter("heading_baseline").as_double());
         use_fog_wz_ = get_parameter("use_fog_wz").as_bool();
         flip_accel_sign_ = get_parameter("flip_accel_sign").as_bool();
@@ -714,7 +720,7 @@ private:
                 else if (num >= 14 && strstr(val[0], "APINS") != nullptr)
                 {
                     decode_ascii_ins(val, decoded_val);
-                    auto stamp = stamp_from_mcu(decoded_val[0]);
+                    auto stamp = monotonic_ins_stamp(stamp_from_mcu(decoded_val[0]));
                     publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
                     health_msg_.add_ins_message(decoded_val);
                     publish_ros_imu_and_nav(decoded_val, stamp);
@@ -766,6 +772,24 @@ private:
             }
         }
         return read_buf_.stamp;
+    }
+
+    // TF requires strictly-increasing stamps per frame. In 'arrival' mode
+    // every message decoded from one port read shares the same host stamp,
+    // so two INS frames in a single read would broadcast odom->ins_link
+    // twice with an identical stamp (tf2 drops the second as
+    // TF_REPEATED_DATA); in 'mcu' mode a settling clock offset can step a
+    // stamp backward (TF_OLD_DATA). Nudge a non-increasing INS stamp
+    // forward by 1 ns so /odom, ins/fix, imu/data and the TF — which all
+    // share this stamp — stay monotonic and consistent.
+    rclcpp::Time monotonic_ins_stamp(const rclcpp::Time &stamp)
+    {
+        if (ins_stamp_valid_ && stamp <= last_ins_stamp_)
+            last_ins_stamp_ = last_ins_stamp_ + rclcpp::Duration(0, 1);
+        else
+            last_ins_stamp_ = stamp;  // first call also adopts the clock type
+        ins_stamp_valid_ = true;
+        return last_ins_stamp_;
     }
 
     // ── RTCM handler ──────────────────────────────────────────────────
@@ -828,7 +852,7 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_apins_t)))
                 return false;
             decode_rtcm_ins_msg(decoded_val, a1buff_);
-            stamp = stamp_from_mcu(decoded_val[0]);
+            stamp = monotonic_ins_stamp(stamp_from_mcu(decoded_val[0]));
             publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
             health_msg_.add_ins_message(decoded_val);
             publish_ros_imu_and_nav(decoded_val, stamp);
@@ -1337,6 +1361,11 @@ private:
     int accel_check_samples_ = 0;      // total IMU samples observed
     int accel_stationary_run_ = 0;     // consecutive stationary+level samples
     double accel_z_flu_sum_ = 0.0;     // sum of published FLU z over the run
+
+    // Last INS stamp broadcast on TF / shared by odom, ins/fix, imu/data;
+    // kept to guarantee strictly-increasing stamps (see monotonic_ins_stamp).
+    rclcpp::Time last_ins_stamp_;
+    bool ins_stamp_valid_ = false;
 
     // Local ENU origin for /odom, anchored at the first valid INS fix
     bool odom_origin_set_ = false;
