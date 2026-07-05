@@ -10,6 +10,9 @@ EVK with your robotics platform (including `robot_localization` and Nav2).
 Using Ethernet as the primary link (recommended for robots)? Follow the
 [Ethernet Setup Guide](doc/ethernet_setup_guide.md) for mounting, unit
 configuration with the ANELLO user tool, and wiring into a ROS2 Jazzy stack.
+Either link uses the [ANELLO user tool](https://github.com/Anello-Photonics/user_tool)
+over USB to set the unit's output format, rate, and baud before first launch —
+the driver reads whatever the unit already streams, it does not configure it.
 Before trusting outputs from a new install or driver upgrade, run the
 [Hardware Validation Checklist](doc/hardware_validation_checklist.md).
 

@@ -54,8 +54,31 @@ Robot Computer ──Ethernet──> ANELLO EVK
   (local IP)                 (192.168.1.111 default)
 ```
 
-For Ethernet, the ANELLO unit must be configured with your computer's IP
-address as its "Computer IP" target. Refer to the ANELLO Developer Manual.
+**Configure the unit first (ANELLO user tool).** The driver reads whatever
+the unit streams — it does *not* set the unit's output format, rate, or baud,
+so those must be configured before launch. Use ANELLO's official Python
+configuration tool over USB:
+
+```bash
+git clone https://github.com/Anello-Photonics/user_tool.git
+cd user_tool
+pip install -r requirements.txt
+python board_tools/user_program.py
+```
+
+In the tool: **Connect → COM** (it auto-detects the config port), then
+**Unit Configuration**. For a serial/USB robot integration, set at least:
+
+| Tool menu name | Code | Value for a typical robot |
+|---|---|---|
+| Message Format | `mfm` | `4` (RTCM binary — compact, full rate; `1`/ASCII is for reading by eye) |
+| Output Data Rate (Hz) | `odr` | `100`, or `200` if the link can carry it |
+| Serial (UART) baud | — | must equal the driver's `baud_rate` param; use `921600` to sustain 200 Hz (230400 tops out near ~50 Hz ASCII / 100 Hz RTCM) |
+
+Save to flash and reset the unit — `odr` and baud changes only take effect
+after a reset. For the full **Ethernet** personality (static IP, `rip`/`lip`,
+UDP ports), use the same tool as detailed in
+[Ethernet Setup Guide §4](ethernet_setup_guide.md#4-one-time-unit-configuration-anello-user-tool).
 
 ### 1.2 USB Permissions
 
