@@ -120,7 +120,7 @@ health_message::health_message()
     this->hdg_ins_mismatch_streak = 0;
 }
 
-void health_message::add_imu_message(double *imu_msg)
+void health_message::add_imu_message(const double *imu_msg)
 {
     this->cur_imu_time = imu_msg[0];
     double wz = imu_msg[6];
@@ -183,7 +183,7 @@ void health_message::add_imu_message(double *imu_msg)
     }
 }
 
-void health_message::add_ins_message(double* ins_msg)
+void health_message::add_ins_message(const double *ins_msg)
 { 
     this->ins_heading = ins_msg[11];
     double ins_status = ins_msg[2];
@@ -249,7 +249,7 @@ void health_message::add_ins_message(double* ins_msg)
     }
 }
 
-void health_message::add_gps_message(double *gps_msg)
+void health_message::add_gps_message(const double *gps_msg)
 {
     this->gps_heading = gps_msg[7];
     if (this->gps_heading > 180)
@@ -267,7 +267,7 @@ void health_message::add_gps_message(double *gps_msg)
     }
 }
 
-void health_message::add_hdg_message(double *hdg_msg)
+void health_message::add_hdg_message(const double *hdg_msg)
 {
     // Ignore epochs where the receiver itself marks the heading invalid;
     // comparing INS heading against an invalid APHDG would accumulate

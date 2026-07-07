@@ -138,6 +138,12 @@ extern std::string compute_checksum(const char *buff, int len)
     return std::string(hex);
 }
 
+extern std::string frame_ascii_command(const std::string &body)
+{
+    std::string ck = compute_checksum(body.c_str(), static_cast<int>(body.length()));
+    return "#" + body + "*" + ck + "\r\n";
+}
+
 /*
  * Parameters
  * char *const buffer : A single valid ASCII message

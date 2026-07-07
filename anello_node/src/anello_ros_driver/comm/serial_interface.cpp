@@ -24,7 +24,6 @@
 
 #include "serial_interface.h"
 
-#define MAX_READ_NUM 1000
 #define SER_PORT_FLUSH_COUNT 20
 
 serial_interface::serial_interface()
@@ -128,18 +127,7 @@ size_t serial_interface::get_data(char *buf, size_t buf_len, int timeout)
         return 0;
     }
 
-    fd_set readSet;
-    FD_ZERO(&readSet);
-    FD_SET(this->usb_fd, &readSet);
-
-    // Split into sec/usec: a timeout >= 1000 ms would otherwise push
-    // tv_usec past 1e6, which select() rejects with EINVAL.
-    struct timeval tv;
-    tv.tv_sec = timeout / 1000;
-    tv.tv_usec = (timeout % 1000) * 1000;
-
-    int ready = select(this->usb_fd + 1, &readSet, nullptr, nullptr, &tv);
-    if (ready <= 0)
+    if (!wait_readable(this->usb_fd, timeout))
     {
         return 0;
     }
@@ -163,11 +151,6 @@ void serial_interface::write_data(const char *buf, size_t buf_len)
 const std::string serial_interface::get_portname() const
 {
     return this->portname;
-}
-
-bool serial_interface::get_port_enabled()
-{
-    return this->port_enabled;
 }
 
 void serial_interface::close_port()

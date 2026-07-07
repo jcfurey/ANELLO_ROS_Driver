@@ -99,10 +99,10 @@ private:
 public:
     health_message();
 
-    void add_imu_message(double *data);
-    void add_ins_message(double *data);
-    void add_gps_message(double *data);
-    void add_hdg_message(double *data);
+    void add_imu_message(const double *data);
+    void add_ins_message(const double *data);
+    void add_gps_message(const double *data);
+    void add_hdg_message(const double *data);
     void set_baseline(double baseline);
 
     uint8_t get_position_status() const;

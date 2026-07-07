@@ -52,7 +52,6 @@ void ethernet_interface::init()
     }
 
     memset(&(this->servaddr), 0, sizeof(this->servaddr));
-    memset(&(this->cliaddr), 0, sizeof(this->cliaddr));
 
     this->servaddr.sin_family = AF_INET;
     this->servaddr.sin_addr.s_addr = INADDR_ANY;
@@ -99,8 +98,8 @@ size_t ethernet_interface::get_data(char *buf, size_t buf_len)
     memset(&srcaddr, 0, sizeof(srcaddr));
 
     // buf_len - 1 leaves room for the NUL terminator below.
-    int n = recvfrom(this->sockfd, buf, buf_len - 1, MSG_DONTWAIT,
-                     (struct sockaddr *)&srcaddr, &len);
+    ssize_t n = recvfrom(this->sockfd, buf, buf_len - 1, MSG_DONTWAIT,
+                         (struct sockaddr *)&srcaddr, &len);
     if (n < 0)
     {
         return 0;
@@ -117,16 +116,7 @@ size_t ethernet_interface::get_data(char *buf, size_t buf_len, int timeout_ms)
 {
     if (this->sockfd < 0) return 0;
 
-    fd_set read_set;
-    FD_ZERO(&read_set);
-    FD_SET(this->sockfd, &read_set);
-
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-    int ready = select(this->sockfd + 1, &read_set, nullptr, nullptr, &tv);
-    if (ready <= 0)
+    if (!wait_readable(this->sockfd, timeout_ms))
     {
         return 0;
     }

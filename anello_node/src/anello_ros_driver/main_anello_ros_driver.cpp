@@ -13,7 +13,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
-#include <deque>
 #include <fstream>
 #include <vector>
 #include <unistd.h>
@@ -52,6 +51,10 @@
 
 #include "bit_tools.h"
 #include "clock_translator.h"
+#include "version.h"
+#include "geo_math.h"
+#include "monotonic_stamp.h"
+#include "rate_monitor.h"
 #include "messaging/rtcm_decoder.h"
 #include "messaging/ascii_decoder.h"
 #include "messaging/message_publisher.h"
@@ -61,7 +64,6 @@ static constexpr double kPi = 3.14159265358979323846;
 static constexpr double kGAccel = 9.80665;
 static constexpr double kDeg2Rad = kPi / 180.0;
 static constexpr double kDeg2RadSq = kDeg2Rad * kDeg2Rad;
-static constexpr double kHalfPi = kPi / 2.0;
 
 /* Frame conventions
  *
@@ -69,20 +71,12 @@ static constexpr double kHalfPi = kPi / 2.0;
  * body-frame vectors in FRD (x forward, y right, z down). The custom
  * "anello/..." topics carry these values unchanged, in the device-native
  * convention. Only the standard ROS interfaces (imu/data, gps/fix, TF)
- * are converted here to REP-103 ENU / FLU.
+ * are converted here to REP-103 ENU / FLU (see geo_math.h for
+ * ned_rpy_deg_to_enu_quat).
  *
  * NED rpy -> ENU rpy:  roll' = roll, pitch' = -pitch, yaw' = pi/2 - heading
  * FRD vec -> FLU vec:  x' = x, y' = -y, z' = -z
  */
-static tf2::Quaternion ned_rpy_deg_to_enu_quat(double roll_deg, double pitch_deg,
-                                               double heading_deg)
-{
-    tf2::Quaternion q;
-    q.setRPY(roll_deg * kDeg2Rad,
-             -pitch_deg * kDeg2Rad,
-             kHalfPi - heading_deg * kDeg2Rad);
-    return q;
-}
 
 /* Sign pattern for rotating a (roll, pitch, yaw) covariance through the
  * NED->ENU axis map D = diag(1, -1, -1): C' = D * C * D. */
@@ -91,8 +85,6 @@ static constexpr double kEnuCovSign[9] = {
     -1.0,  1.0,  1.0,
     -1.0,  1.0,  1.0,
 };
-
-static int input_a1_data(a1buff_t *a1, uint8_t data);
 
 namespace anello
 {
@@ -103,6 +95,17 @@ struct ImuCache
     double wx = 0.0, wy = 0.0, wz = 0.0;
     double wz_fog = 0.0;
 };
+
+// Body-frame sample from a decoded APIMU/APIM1 value array (device
+// units: g / deg/s, FRD axes).
+static ImuCache imu_cache_from(const double val[])
+{
+    ImuCache imu;
+    imu.ax = val[1]; imu.ay = val[2]; imu.az = val[3];
+    imu.wx = val[4]; imu.wy = val[5]; imu.wz = val[6];
+    imu.wz_fog = val[7];
+    return imu;
+}
 
 struct CovCache
 {
@@ -117,55 +120,6 @@ struct ReadBuffer
     int nbytes = 0;
     char buff[MAX_BUF_LEN] = {};
     rclcpp::Time stamp;  // host time captured at the port read
-};
-
-/* Sliding-window message/error rates for diagnostics: lifetime totals
- * plus a trailing window, so a device that stops streaming (or a link
- * that degrades) is visible on /diagnostics instead of showing the last
- * known health flags as "nominal". Single-threaded access only. */
-struct RateMonitor
-{
-    static constexpr double kWindowSeconds = 5.0;
-
-    uint64_t total_ok = 0;
-    uint64_t total_checksum_fail = 0;
-    uint64_t total_parse_fail = 0;
-
-    void add_ok()            { total_ok++;            push(recent_ok_); }
-    void add_checksum_fail() { total_checksum_fail++; push(recent_err_); }
-    void add_parse_fail()    { total_parse_fail++;    push(recent_err_); }
-
-    double rate_hz()
-    {
-        trim(recent_ok_);
-        return static_cast<double>(recent_ok_.size()) / kWindowSeconds;
-    }
-    double error_percent()
-    {
-        trim(recent_ok_);
-        trim(recent_err_);
-        const size_t total = recent_ok_.size() + recent_err_.size();
-        return total > 0
-            ? 100.0 * static_cast<double>(recent_err_.size()) / static_cast<double>(total)
-            : 0.0;
-    }
-
-private:
-    std::deque<std::chrono::steady_clock::time_point> recent_ok_;
-    std::deque<std::chrono::steady_clock::time_point> recent_err_;
-
-    static void trim(std::deque<std::chrono::steady_clock::time_point> &q)
-    {
-        const auto cutoff = std::chrono::steady_clock::now() -
-            std::chrono::milliseconds(static_cast<int64_t>(kWindowSeconds * 1000));
-        while (!q.empty() && q.front() < cutoff)
-            q.pop_front();
-    }
-    static void push(std::deque<std::chrono::steady_clock::time_point> &q)
-    {
-        trim(q);
-        q.push_back(std::chrono::steady_clock::now());
-    }
 };
 
 class AnelloRosDriver : public rclcpp::Node
@@ -194,7 +148,8 @@ public:
         setup_diagnostics();
         setup_timers();
 
-        RCLCPP_INFO(get_logger(), "ANELLO ROS2 driver initialized (v3.1.0)");
+        RCLCPP_INFO(get_logger(), "ANELLO ROS2 driver initialized (v%d.%d.%d)",
+                    MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION);
     }
 
     ~AnelloRosDriver() override = default;
@@ -334,14 +289,14 @@ private:
         use_fog_wz_ = get_parameter("use_fog_wz").as_bool();
         flip_accel_sign_ = get_parameter("flip_accel_sign").as_bool();
 
-        timestamp_source_ = get_parameter("timestamp_source").as_string();
-        if (timestamp_source_ != "arrival" && timestamp_source_ != "mcu") {
+        std::string timestamp_source = get_parameter("timestamp_source").as_string();
+        if (timestamp_source != "arrival" && timestamp_source != "mcu") {
             RCLCPP_WARN(get_logger(),
                 "Unknown timestamp_source '%s' — falling back to 'arrival'",
-                timestamp_source_.c_str());
-            timestamp_source_ = "arrival";
+                timestamp_source.c_str());
+            timestamp_source = "arrival";
         }
-        use_mcu_stamp_ = (timestamp_source_ == "mcu");
+        use_mcu_stamp_ = (timestamp_source == "mcu");
 
         auto read_cov3 = [this](const char *name, double out[3]) {
             auto v = get_parameter(name).as_double_array();
@@ -454,9 +409,7 @@ private:
             [this](const anello_interfaces::msg::APODO::SharedPtr msg) {
                 std::ostringstream body;
                 body << "APODO," << std::fixed << std::setprecision(2) << msg->odo_speed;
-                std::string body_str = body.str();
-                std::string ck = compute_checksum(body_str.c_str(), body_str.length());
-                std::string full = "#" + body_str + "*" + ck + "\r\n";
+                std::string full = frame_ascii_command(body.str());
                 if (config_.type == ETH && odo_eth_port_)
                     odo_eth_port_->write_data(full.c_str(), full.length());
                 else if (config_port_)
@@ -491,9 +444,7 @@ private:
         char read_buf[kMaxResp];
         std::string response;
 
-        std::string body = req->command;
-        std::string ck = compute_checksum(body.c_str(), body.size());
-        std::string full = "#" + body + "*" + ck + "\r\n";
+        std::string full = frame_ascii_command(req->command);
 
         // Drain stale bytes (a previous call's late response, unsolicited
         // APODO acks on the shared UART) so they can't be returned as
@@ -552,7 +503,8 @@ private:
 
         // Same translation as the /odom pose for this INS message (zero
         // until the odom origin anchors): TF and /odom describe the same
-        // odom -> ins transform and must not disagree.
+        // tf_parent_ -> tf_child_ transform (default odom -> base_link)
+        // and must not disagree.
         t.transform.translation.x = odom_pos_enu_[0];
         t.transform.translation.y = odom_pos_enu_[1];
         t.transform.translation.z = odom_pos_enu_[2];
@@ -709,63 +661,43 @@ private:
                 if (num >= 17 && strstr(val[0], "APGPS") != nullptr)
                 {
                     decode_ascii_gps(val, decoded_val);
-                    auto stamp = stamp_from_mcu(decoded_val[0]);
-                    publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
-                    publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
-                    publish_navsat_from_gps(decoded_val, stamp);
-                    health_msg_.add_gps_message(decoded_val);
+                    handle_gps_decoded(decoded_val);
                     is_ok = true;
                 }
                 else if (num >= 17 && strstr(val[0], "APGP2") != nullptr)
                 {
                     decode_ascii_gps(val, decoded_val);
-                    auto stamp = stamp_from_mcu(decoded_val[0]);
-                    publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);
+                    handle_gp2_decoded(decoded_val);
                     is_ok = true;
                 }
                 else if (num >= 12 && strstr(val[0], "APHDG") != nullptr)
                 {
                     decode_ascii_hdr(val, decoded_val);
-                    auto stamp = stamp_from_mcu(decoded_val[0]);
-                    publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
-                    health_msg_.add_hdg_message(decoded_val);
+                    handle_hdg_decoded(decoded_val);
                     is_ok = true;
                 }
                 else if (num >= 12 && strstr(val[0], "APIMU") != nullptr)
                 {
                     decode_ascii_imu(val, num, decoded_val);
-                    auto stamp = stamp_from_mcu(decoded_val[0]);
-                    publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
-                    publish_ros_imu_raw(decoded_val, stamp);
-                    health_msg_.add_imu_message(decoded_val);
-                    store_last_imu(decoded_val);
+                    handle_imu_decoded(decoded_val);
                     is_ok = true;
                 }
                 else if (num >= 11 && strstr(val[0], "APIM1") != nullptr)
                 {
                     decode_ascii_im1(val, num, decoded_val);
-                    auto stamp = stamp_from_mcu(decoded_val[0]);
-                    publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
-                    publish_ros_imu_raw(decoded_val, stamp);
+                    handle_im1_decoded(decoded_val);
                     is_ok = true;
                 }
                 else if (num >= 20 && strstr(val[0], "APCOV") != nullptr)
                 {
                     decode_ascii_cov(val, decoded_val);
-                    auto stamp = stamp_from_mcu(decoded_val[0]);
-                    publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
-                    store_last_cov(decoded_val);
+                    handle_cov_decoded(decoded_val);
                     is_ok = true;
                 }
                 else if (num >= 14 && strstr(val[0], "APINS") != nullptr)
                 {
                     decode_ascii_ins(val, decoded_val);
-                    auto stamp = monotonic_ins_stamp(stamp_from_mcu(decoded_val[0]));
-                    publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
-                    health_msg_.add_ins_message(decoded_val);
-                    publish_ros_imu_and_nav(decoded_val, stamp);
-                    broadcast_ins_tf(decoded_val[9], decoded_val[10],
-                                     decoded_val[11], stamp);
+                    handle_ins_decoded(decoded_val);
                     is_ok = true;
                 }
             }
@@ -814,32 +746,72 @@ private:
         return read_buf_.stamp;
     }
 
-    // TF requires strictly-increasing stamps per frame. In 'arrival' mode
-    // every message decoded from one port read shares the same host stamp,
-    // so two INS frames in a single read would broadcast odom->ins_link
-    // twice with an identical stamp (tf2 drops the second as
-    // TF_REPEATED_DATA); in 'mcu' mode a settling clock offset can step a
-    // stamp backward (TF_OLD_DATA). Nudge a non-increasing INS stamp
-    // forward by 1 ns so /odom, ins/fix, imu/data and the TF — which all
-    // share this stamp — stay monotonic and consistent.
-    rclcpp::Time monotonic_ins_stamp(const rclcpp::Time &stamp)
+    // ── Per-message pipelines ─────────────────────────────────────────
+    // One pipeline per message type, shared verbatim by the ASCII and
+    // RTCM branches (which differ only in the decode step).
+    void handle_gps_decoded(double *val)
     {
-        if (ins_stamp_valid_ && stamp <= last_ins_stamp_)
-            last_ins_stamp_ = last_ins_stamp_ + rclcpp::Duration(0, 1);
-        else
-            last_ins_stamp_ = stamp;  // first call also adopts the clock type
-        ins_stamp_valid_ = true;
-        return last_ins_stamp_;
+        auto stamp = stamp_from_mcu(val[0]);
+        publish_gps(val, pub_gps_, stamp, frame_gnss_);
+        publish_gga(val, pub_gga_, stamp, frame_gnss_);
+        publish_navsat_from_gps(val, stamp);
+        health_msg_.add_gps_message(val);
+    }
+
+    void handle_gp2_decoded(double *val)
+    {
+        auto stamp = stamp_from_mcu(val[0]);
+        publish_gps(val, pub_gp2_, stamp, frame_gnss_);
+    }
+
+    void handle_hdg_decoded(double *val)
+    {
+        auto stamp = stamp_from_mcu(val[0]);
+        publish_hdr(val, pub_hdg_, stamp, frame_hdg_);
+        health_msg_.add_hdg_message(val);
+    }
+
+    void handle_imu_decoded(double *val)
+    {
+        auto stamp = stamp_from_mcu(val[0]);
+        publish_imu(val, pub_imu_, stamp, frame_imu_);
+        publish_ros_imu_raw(val, stamp);
+        health_msg_.add_imu_message(val);
+        store_last_imu(val);
+    }
+
+    void handle_im1_decoded(double *val)
+    {
+        auto stamp = stamp_from_mcu(val[0]);
+        publish_im1(val, pub_im1_, stamp, frame_imu_);
+        publish_ros_imu_raw(val, stamp);
+    }
+
+    void handle_ins_decoded(double *val)
+    {
+        auto stamp = ins_stamp_.next(stamp_from_mcu(val[0]));
+        publish_ins(val, pub_ins_, stamp, frame_ins_);
+        health_msg_.add_ins_message(val);
+        publish_ros_imu_and_nav(val, stamp);
+        broadcast_ins_tf(val[9], val[10], val[11], stamp);
+    }
+
+    void handle_cov_decoded(double *val)
+    {
+        auto stamp = stamp_from_mcu(val[0]);
+        publish_cov(val, pub_cov_, stamp, frame_ins_);
+        store_last_cov(val);
     }
 
     // ── RTCM handler ──────────────────────────────────────────────────
 
     // The decoders memcpy a fixed-size packed struct from the payload at
-    // buf+5 (3-byte frame header + 12-bit type + 4-bit subtype), so the
-    // frame length (nlen = payload + 3) must cover struct size + 5.
+    // buf + kRtcmPayloadOffset (3-byte frame header + 12-bit type + 4-bit
+    // subtype), so the frame length (nlen = payload + 3) must cover
+    // struct size + kRtcmPayloadOffset.
     bool rtcm_payload_covers(size_t struct_size) const
     {
-        return a1buff_.nlen >= static_cast<int>(struct_size) + 5;
+        return a1buff_.nlen >= static_cast<int>(struct_size) + kRtcmPayloadOffset;
     }
 
     bool handle_rtcm_message(double *decoded_val)
@@ -847,35 +819,22 @@ private:
         if (a1buff_.type != 4058 || a1buff_.crc)
             return false;
 
-        // All subtypes carry the device MCU time as decoded_val[0] (ms),
-        // so the stamp is computed after each decode.
-        rclcpp::Time stamp;
-
         switch (a1buff_.subtype) {
         case 1: // IMU
             if (!rtcm_payload_covers(sizeof(rtcm_old_apimu_t)))
                 return false;
             decode_rtcm_imu_msg(decoded_val, a1buff_);
-            stamp = stamp_from_mcu(decoded_val[0]);
-            publish_imu(decoded_val, pub_imu_, stamp, frame_imu_);
-            publish_ros_imu_raw(decoded_val, stamp);
-            health_msg_.add_imu_message(decoded_val);
-            store_last_imu(decoded_val);
+            handle_imu_decoded(decoded_val);
             return true;
 
         case 2: { // GPS PVT
             if (!rtcm_payload_covers(sizeof(rtcm_apgps_t)))
                 return false;
             int ant_id = decode_rtcm_gps_msg(decoded_val, a1buff_);
-            stamp = stamp_from_mcu(decoded_val[0]);
-            if (GPS1 == ant_id) {
-                publish_gps(decoded_val, pub_gps_, stamp, frame_gnss_);
-                publish_gga(decoded_val, pub_gga_, stamp, frame_gnss_);
-                publish_navsat_from_gps(decoded_val, stamp);
-                health_msg_.add_gps_message(decoded_val);
-            } else {
-                publish_gp2(decoded_val, pub_gp2_, stamp, frame_gnss_);
-            }
+            if (GPS1 == ant_id)
+                handle_gps_decoded(decoded_val);
+            else
+                handle_gp2_decoded(decoded_val);
             return true;
         }
 
@@ -883,39 +842,28 @@ private:
             if (!rtcm_payload_covers(sizeof(rtcm_aphdr_t)))
                 return false;
             decode_rtcm_hdg_msg(decoded_val, a1buff_);
-            stamp = stamp_from_mcu(decoded_val[0]);
-            publish_hdr(decoded_val, pub_hdg_, stamp, frame_hdg_);
-            health_msg_.add_hdg_message(decoded_val);
+            handle_hdg_decoded(decoded_val);
             return true;
 
         case 4: // INS
             if (!rtcm_payload_covers(sizeof(rtcm_apins_t)))
                 return false;
             decode_rtcm_ins_msg(decoded_val, a1buff_);
-            stamp = monotonic_ins_stamp(stamp_from_mcu(decoded_val[0]));
-            publish_ins(decoded_val, pub_ins_, stamp, frame_ins_);
-            health_msg_.add_ins_message(decoded_val);
-            publish_ros_imu_and_nav(decoded_val, stamp);
-            broadcast_ins_tf(decoded_val[9], decoded_val[10],
-                             decoded_val[11], stamp);
+            handle_ins_decoded(decoded_val);
             return true;
 
         case 6: // IM1
             if (!rtcm_payload_covers(sizeof(rtcm_apim1_t)))
                 return false;
             decode_rtcm_im1_msg(decoded_val, a1buff_);
-            stamp = stamp_from_mcu(decoded_val[0]);
-            publish_im1(decoded_val, pub_im1_, stamp, frame_imu_);
-            publish_ros_imu_raw(decoded_val, stamp);
+            handle_im1_decoded(decoded_val);
             return true;
 
         case 10: // APCOV
             if (!rtcm_payload_covers(sizeof(rtcm_apcov_t)))
                 return false;
             decode_rtcm_cov_msg(decoded_val, a1buff_);
-            stamp = stamp_from_mcu(decoded_val[0]);
-            publish_cov(decoded_val, pub_cov_, stamp, frame_ins_);
-            store_last_cov(decoded_val);
+            handle_cov_decoded(decoded_val);
             return true;
 
         default:
@@ -926,9 +874,7 @@ private:
     // ── Standard ROS message publishing ───────────────────────────────
     void store_last_imu(const double val[])
     {
-        imu_cache_.ax = val[1]; imu_cache_.ay = val[2]; imu_cache_.az = val[3];
-        imu_cache_.wx = val[4]; imu_cache_.wy = val[5]; imu_cache_.wz = val[6];
-        imu_cache_.wz_fog = val[7];
+        imu_cache_ = imu_cache_from(val);
     }
 
     // Body-frame measurements converted FRD -> FLU and to SI units, shared
@@ -960,10 +906,7 @@ private:
     // marks the orientation field as unreported.
     void publish_ros_imu_raw(const double val[], rclcpp::Time stamp)
     {
-        ImuCache imu;
-        imu.ax = val[1]; imu.ay = val[2]; imu.az = val[3];
-        imu.wx = val[4]; imu.wy = val[5]; imu.wz = val[6];
-        imu.wz_fog = val[7];
+        const ImuCache imu = imu_cache_from(val);
 
         auto msg = sensor_msgs::msg::Imu();
         msg.header.stamp = stamp;
@@ -1184,18 +1127,12 @@ private:
             odom_ref_lat_ = lat;
             odom_ref_lon_ = lon;
             odom_ref_alt_ = alt;
-            // Local tangent plane scale at the anchor. The spherical
-            // approximation (a·π/180 on both axes) is off by up to 0.7%
-            // per axis, meters of systematic error within a km — far
-            // outside the cm-level RTK covariance published alongside.
-            constexpr double kWgs84A = 6378137.0;
-            constexpr double kWgs84E2 = 6.69437999014e-3;
-            const double slat = std::sin(lat * kDeg2Rad);
-            const double denom = 1.0 - kWgs84E2 * slat * slat;
-            odom_m_per_deg_lat_ = kDeg2Rad * kWgs84A * (1.0 - kWgs84E2) /
-                                  (denom * std::sqrt(denom));
-            odom_m_per_deg_lon_ = kDeg2Rad * (kWgs84A / std::sqrt(denom)) *
-                                  std::cos(lat * kDeg2Rad);
+            // WGS-84 local tangent plane scale at the anchor (see
+            // geo_math.h): the spherical approximation would put meters
+            // of systematic error within a km — far outside the cm-level
+            // RTK covariance published alongside.
+            wgs84_meters_per_degree(lat, odom_m_per_deg_lat_,
+                                    odom_m_per_deg_lon_);
             odom_origin_set_ = true;
             RCLCPP_INFO(get_logger(),
                 "odom origin anchored at lat=%.7f lon=%.7f alt=%.2f",
@@ -1206,17 +1143,13 @@ private:
         {
             // Wrap the longitude delta so an anchor near the antimeridian
             // doesn't produce a ±360° jump when the vehicle crosses it.
-            double dlon = lon - odom_ref_lon_;
-            if (dlon > 180.0)
-                dlon -= 360.0;
-            else if (dlon < -180.0)
-                dlon += 360.0;
+            const double dlon = wrap_dlon_deg(lon - odom_ref_lon_);
             odom.pose.pose.position.x = dlon * odom_m_per_deg_lon_;
             odom.pose.pose.position.y =
                 (lat - odom_ref_lat_) * odom_m_per_deg_lat_;
             odom.pose.pose.position.z = alt - odom_ref_alt_;
-            // Keep the broadcast TF (same odom -> ins frame pair)
-            // consistent with this pose.
+            // Keep the broadcast TF (same tf_parent_ -> tf_child_ frame
+            // pair, default odom -> base_link) consistent with this pose.
             odom_pos_enu_[0] = odom.pose.pose.position.x;
             odom_pos_enu_[1] = odom.pose.pose.position.y;
             odom_pos_enu_[2] = odom.pose.pose.position.z;
@@ -1380,7 +1313,6 @@ private:
     bool flip_accel_sign_ = false;
     double ang_vel_cov_[3] = {};
     double lin_acc_cov_[3] = {};
-    std::string timestamp_source_ = "mcu";
     bool use_mcu_stamp_ = false;
     ClockTranslator clock_translator_;
 
@@ -1388,7 +1320,7 @@ private:
     ReadBuffer read_buf_;
     a1buff_t a1buff_;
     bool frame_fail_reported_ = false;
-    RateMonitor rate_monitor_;
+    RateMonitor<> rate_monitor_;
     health_message health_msg_;
     ImuCache imu_cache_;
     CovCache cov_cache_;
@@ -1405,9 +1337,8 @@ private:
     double accel_z_flu_sum_ = 0.0;     // sum of published FLU z over the run
 
     // Last INS stamp broadcast on TF / shared by odom, ins/fix, imu/data;
-    // kept to guarantee strictly-increasing stamps (see monotonic_ins_stamp).
-    rclcpp::Time last_ins_stamp_;
-    bool ins_stamp_valid_ = false;
+    // kept to guarantee strictly-increasing stamps (see monotonic_stamp.h).
+    MonotonicStamp ins_stamp_;
 
     // Local ENU origin for /odom, anchored at the first valid INS fix
     bool odom_origin_set_ = false;
@@ -1425,107 +1356,3 @@ rclcpp::Node::SharedPtr make_anello_driver(const rclcpp::NodeOptions &options)
 } // namespace anello
 
 RCLCPP_COMPONENTS_REGISTER_NODE(anello::AnelloRosDriver)
-
-
-/* State machine decoder for ASCII and RTCM messages
- *
- * Return:
- *   0 = not ready
- *   1 = ASCII message ready
- *   5 = RTCM message ready
- */
-static int input_a1_data(a1buff_t *a1, uint8_t data)
-{
-    int ret = 0;
-
-    // Reset one byte early: buf is zeroed at frame start, so capping
-    // nbyte at MAX_BUF_LEN - 1 keeps buf[MAX_BUF_LEN - 1] an untouched
-    // NUL. A frame completing at exactly MAX_BUF_LEN bytes would
-    // otherwise reach parse_fields()/"%s" logging unterminated.
-    if (a1->nbyte >= MAX_BUF_LEN - 1)
-        a1->nbyte = 0;
-
-    // Detect correct start characters: #AP or 0xD3
-    if (a1->nbyte == 0 && !(data == '#' || data == 0xD3))
-    {
-        a1->nbyte = 0;
-        return 0;
-    }
-    // On a header mismatch, re-run the rejected byte through start
-    // detection (single-level recursion: nbyte is 0 on re-entry) so a
-    // '#' or 0xD3 that aborts a false header still opens a new frame —
-    // otherwise "#A#APIMU,..." style streams drop the valid message.
-    if (a1->nbyte == 1 && !((data == 'A' && a1->buf[0] == '#') || a1->buf[0] == 0xD3))
-    {
-        a1->nbyte = 0;
-        return input_a1_data(a1, data);
-    }
-    if (a1->nbyte == 2 && !((data == 'P' && a1->buf[1] == 'A' && a1->buf[0] == '#') || a1->buf[0] == 0xD3))
-    {
-        a1->nbyte = 0;
-        return input_a1_data(a1, data);
-    }
-
-    if (a1->nbyte == 0)
-    {
-        *a1 = a1buff_t{};
-    }
-
-    if (a1->nbyte < 3)
-    {
-        a1->buf[a1->nbyte++] = data;
-        return 0;
-    }
-
-    if (a1->buf[0] != 0xD3)
-    {
-        // ASCII message
-        if (data == ',')
-        {
-            if (a1->nseg < MAXFIELD)
-                a1->loc[a1->nseg++] = a1->nbyte;
-            if (a1->nseg == 2)
-                a1->nlen = 0;
-        }
-
-        a1->buf[a1->nbyte++] = data;
-
-        if (a1->nlen == 0)
-        {
-            if (data == '\r' || data == '\n')
-            {
-                if (a1->nbyte > 3 && a1->buf[a1->nbyte - 4] == '*')
-                {
-                    if (a1->nseg < MAXFIELD)
-                        a1->loc[a1->nseg++] = a1->nbyte - 4;
-                    ret = 1;
-                }
-            }
-        }
-    }
-    else
-    {
-        // RTCM message
-        a1->buf[a1->nbyte++] = data;
-        a1->nlen = getbitu(a1->buf, 14, 10) + 3;
-        if (a1->nbyte >= a1->nlen + 3)
-        {
-            int i = 24;
-            a1->type = getbitu(a1->buf, i, 12);
-            i += 12;
-
-            if (crc24q(a1->buf, a1->nlen) != getbitu(a1->buf, a1->nlen * 8, 24))
-            {
-                a1->crc = 1;
-            }
-            else
-            {
-                a1->crc = 0;
-                if (a1->type == 4058)
-                    a1->subtype = getbitu(a1->buf, i, 4);
-            }
-            ret = 5;
-        }
-    }
-    return ret;
-}

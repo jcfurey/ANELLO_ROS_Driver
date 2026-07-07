@@ -24,14 +24,6 @@
 
 #include "base_interface.h"
 
-#ifndef DEFAULT_DATA_INTERFACE
-#define DEFAULT_DATA_INTERFACE "/dev/ttyUSB0"
-#endif
-
-#ifndef DEFAULT_CONFIG_INTERFACE
-#define DEFAULT_CONFIG_INTERFACE "/dev/ttyUSB3"
-#endif
-
 #ifndef PORT_DIR
 #define PORT_DIR "/dev/"
 #endif
@@ -105,14 +97,6 @@ public:
      * string containing the port name
      */
     const std::string get_portname() const;
-
-    /*
-     * Parameters:
-     *
-     * Return:
-     * bool value of the port status
-     */
-    bool get_port_enabled();
 
     /*
      * Notes:

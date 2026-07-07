@@ -15,6 +15,10 @@
 
 #include "../main_anello_ros_driver.h"
 
+/* The packed payload struct starts 5 bytes into the RTCM frame buffer:
+ * 3-byte frame header + 12-bit message type + 4-bit subtype. */
+constexpr int kRtcmPayloadOffset = 5;
+
 enum RECEIVER_ID
 {
     GPS1 = 1,

@@ -32,14 +32,8 @@
 #include <nmea_msgs/msg/sentence.hpp>
 #include <std_msgs/msg/header.hpp>
 
-void publish_gga(double *gps, const gga_pub_t &pub, rclcpp::Time time, const std::string &frame_id)
+std::string build_gga_sentence(const double *gps)
 {
-    std_msgs::msg::Header msg_header;
-    nmea_msgs::msg::Sentence gga_message;
-
-    msg_header.frame_id = frame_id;
-    msg_header.stamp = time;
-
     std::ostringstream gngga_message;
     gngga_message << "$GNGGA,";
 
@@ -116,13 +110,21 @@ void publish_gga(double *gps, const gga_pub_t &pub, rclcpp::Time time, const std
     std::string ck = compute_checksum(sentence.c_str() + 1, sentence.length() - 1);
     sentence += "*" + ck + "\r\n";
 
-    gga_message.header = msg_header;
-    gga_message.sentence = std::move(sentence);
+    return sentence;
+}
+
+void publish_gga(const double *gps, const gga_pub_t &pub, rclcpp::Time time, const std::string &frame_id)
+{
+    nmea_msgs::msg::Sentence gga_message;
+
+    gga_message.header.frame_id = frame_id;
+    gga_message.header.stamp = time;
+    gga_message.sentence = build_gga_sentence(gps);
 
     pub->publish(gga_message);
 }
 
-void publish_gps(double *gps, const gps_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_gps(const double *gps, const gps_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APGPS msg;
 
@@ -149,34 +151,7 @@ void publish_gps(double *gps, const gps_pub_t &pub, rclcpp::Time stamp, const st
     pub->publish(msg);
 }
 
-void publish_gp2(double *gp2, const gps_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
-{
-    anello_interfaces::msg::APGPS msg;
-
-    msg.header.stamp = stamp;
-    msg.header.frame_id = frame_id;
-
-    msg.mcu_time = gp2[0];
-    msg.gps_time = gp2[1];
-    msg.lat = gp2[2];
-    msg.lon = gp2[3];
-    msg.alt_ellipsoid = gp2[4];
-    msg.alt_msl = gp2[5];
-    msg.speed = gp2[6];
-    msg.heading = gp2[7];
-    msg.hacc = gp2[8];
-    msg.vacc = gp2[9];
-    msg.pdop = gp2[10];
-    msg.fix_type = static_cast<uint8_t>(gp2[11]);
-    msg.sat_num = static_cast<uint8_t>(gp2[12]);
-    msg.speed_accuracy = gp2[13];
-    msg.heading_accuracy = gp2[14];
-    msg.rtk_fix_status = static_cast<uint8_t>(gp2[15]);
-
-    pub->publish(msg);
-}
-
-void publish_hdr(double *hdr, const hdg_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_hdr(const double *hdr, const hdg_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     uint16_t status = static_cast<uint16_t>(hdr[9]);
 
@@ -208,7 +183,7 @@ void publish_hdr(double *hdr, const hdg_pub_t &pub, rclcpp::Time stamp, const st
     pub->publish(msg);
 }
 
-void publish_imu(double *imu, const imu_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_imu(const double *imu, const imu_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APIMU msg;
 
@@ -231,7 +206,7 @@ void publish_imu(double *imu, const imu_pub_t &pub, rclcpp::Time stamp, const st
     pub->publish(msg);
 }
 
-void publish_im1(double *im1, const im1_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_im1(const double *im1, const im1_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APIM1 msg;
 
@@ -252,7 +227,7 @@ void publish_im1(double *im1, const im1_pub_t &pub, rclcpp::Time stamp, const st
     pub->publish(msg);
 }
 
-void publish_ins(double *ins, const ins_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_ins(const double *ins, const ins_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APINS msg;
 
@@ -276,7 +251,7 @@ void publish_ins(double *ins, const ins_pub_t &pub, rclcpp::Time stamp, const st
     pub->publish(msg);
 }
 
-void publish_cov(double *cov, const apcov_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
+void publish_cov(const double *cov, const apcov_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
     anello_interfaces::msg::APCOV msg;
 

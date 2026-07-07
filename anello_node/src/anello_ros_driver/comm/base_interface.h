@@ -16,6 +16,25 @@
 #include <string>
 #include <cstdint>
 
+#include <sys/select.h>
+
+/* Wait up to timeout_ms for fd to become readable. Returns true when a
+ * subsequent read will not block. */
+inline bool wait_readable(int fd, int timeout_ms)
+{
+    fd_set read_set;
+    FD_ZERO(&read_set);
+    FD_SET(fd, &read_set);
+
+    // Split into sec/usec: a timeout >= 1000 ms would otherwise push
+    // tv_usec past 1e6, which select() rejects with EINVAL.
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    return select(fd + 1, &read_set, nullptr, nullptr, &tv) > 0;
+}
+
 enum interface_type_t
 {
     UART,

@@ -17,7 +17,7 @@
 v3.1.0 : Audit fixes, hardening, and EVK alignment
             1. Fix RTCM QoS mismatch (corrections now reach the device)
             2. Memory-safety fixes in the ASCII/RTCM parser and sockets
-            3. Convert standard interfaces to REP-103 ENU/FLU; anello/*
+            3. Convert standard interfaces to REP-103 ENU/FLU; anello/...
                topics stay device-native (NED/FRD)
             4. NavSatFix status from the full APINS status enumeration
             5. Drain data port per tick; non-blocking ethernet reads

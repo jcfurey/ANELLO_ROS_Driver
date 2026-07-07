@@ -143,7 +143,6 @@ int decode_ascii_ins(char *val[], double *output_val)
     output_val[11] = atof(val[12]);         /* heading (deg) */
 
     output_val[12] = atoi(val[13]);         /* zupt */
-    output_val[13] = atof(val[2]) * 1.0e-9; /* GPS Time s (ns value overflows int) */
 
     return 1;
 }

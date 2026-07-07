@@ -21,21 +21,16 @@
 #include "anello_interfaces/msg/aphdg.hpp"
 #include "anello_interfaces/msg/aphealth.hpp"
 #include "anello_interfaces/msg/apcov.hpp"
-#include "anello_interfaces/msg/apodo.hpp"
 #include "nmea_msgs/msg/sentence.hpp"
-#include "rtcm_msgs/msg/message.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/nav_sat_fix.hpp"
 
 #include "bit_tools.h"
+#include "messaging/frame_parser.h"
 #include "comm/serial_interface.h"
 #include "comm/ethernet_interface.h"
 #include "comm/anello_config_port.h"
 #include "comm/anello_data_port.h"
-
-#ifndef MAX_BUF_LEN
-#define MAX_BUF_LEN (1200)
-#endif
 
 #define DEBUG_PRINT(...) RCLCPP_DEBUG(rclcpp::get_logger("anello_ros_driver"), __VA_ARGS__)
 #define ERROR_PRINT(...) RCLCPP_ERROR(rclcpp::get_logger("anello_ros_driver"), __VA_ARGS__)
@@ -52,19 +47,6 @@ using gga_pub_t = rclcpp::Publisher<nmea_msgs::msg::Sentence>::SharedPtr;
 using apcov_pub_t = rclcpp::Publisher<anello_interfaces::msg::APCOV>::SharedPtr;
 using ros_imu_pub_t = rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr;
 using navfix_pub_t = rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr;
-
-// Message buffer structure
-struct a1buff_t
-{
-    uint8_t buf[MAX_BUF_LEN] = {};
-    int nseg = 0;
-    int nbyte = 0;
-    int nlen = 0;
-    int type = 0;
-    int subtype = 0;
-    int crc = 0;
-    int loc[MAXFIELD] = {};
-};
 
 // RTCM binary message structures
 #pragma pack(push, 1)

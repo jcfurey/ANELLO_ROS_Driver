@@ -50,5 +50,8 @@ extern "C"
 
 #include <string>
 extern std::string compute_checksum(const char *buff, int len);
+/* Frame an ASCII command body for the device: "#" + body + "*" + checksum
+ * + "\r\n". */
+extern std::string frame_ascii_command(const std::string &body);
 extern int parse_fields(char *const buffer, char **val);
 #endif

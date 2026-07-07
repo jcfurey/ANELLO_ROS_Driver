@@ -57,7 +57,6 @@ public:
      * This function initializes the serial port interface including configuring the port.
      */
     void init();
-    size_t get_data(char *buf, size_t buf_len);
     /* timeout_ms applies to UART reads only (select() bound); ethernet
      * reads are always non-blocking. A 0 ms UART poll that returns empty
      * does not count toward port rotation. */
@@ -69,7 +68,7 @@ public:
 
     const std::string get_portname() const {
         if (this->config.type == ETH) {
-            return this->ethernet_port.get_remote_ip(); // Assuming get_remote_ip() exists
+            return this->ethernet_port.get_remote_ip();
         } else {
             return this->uart_port.get_portname();
         }

@@ -164,11 +164,6 @@ void anello_data_port::port_confirm_ethernet()
     /* Nothing to do */
 }
 
-size_t anello_data_port::get_data(char *buf, size_t buf_len)
-{
-    return this->get_data(buf, buf_len, 10);
-}
-
 size_t anello_data_port::get_data(char *buf, size_t buf_len, int timeout_ms)
 {
     if (this->config.type == ETH)

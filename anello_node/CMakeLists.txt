@@ -30,6 +30,7 @@ set(DRIVER_SOURCES
   src/anello_ros_driver/comm/anello_config_port.cpp
   src/anello_ros_driver/comm/anello_data_port.cpp
   src/anello_ros_driver/messaging/ascii_decoder.cpp
+  src/anello_ros_driver/messaging/frame_parser.cpp
   src/anello_ros_driver/messaging/health_message.cpp
   src/anello_ros_driver/messaging/message_publisher.cpp
   src/anello_ros_driver/messaging/rtcm_decoder.cpp
