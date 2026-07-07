@@ -91,6 +91,21 @@ TEST(BitUtils, GetBitsSignExtends)
     EXPECT_EQ(getbits(buf, 8, 8), 127);
 }
 
+TEST(Crc24q, CrossImplementationGoldVector)
+{
+    // Gold value computed with the separate Python CRC-24Q
+    // implementation in ntrip_client/src/ntrip_client/rtcm_parser.py:
+    //   RTCMParser()._checksum(b'ANELLO CRC24Q cross-check vector')
+    //   == 0x83B7DC
+    // This cross-checks the C++ and Python implementations against
+    // each other: round-trip tests alone would pass even if a table
+    // entry were corrupted identically on one side.
+    const char *msg = "ANELLO CRC24Q cross-check vector";
+    EXPECT_EQ(crc24q(reinterpret_cast<const unsigned char *>(msg),
+                     static_cast<int>(strlen(msg))),
+              0x83B7DCu);
+}
+
 TEST(Crc24q, MatchesFrameRoundTrip)
 {
     // CRC of the empty message is 0 (init value), and any single-bit

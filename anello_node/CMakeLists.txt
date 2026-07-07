@@ -101,6 +101,11 @@ if(BUILD_TESTING)
     test/test_rtcm_decoder.cpp
     test/test_health_message.cpp
     test/test_clock_translator.cpp
+    test/test_frame_parser.cpp
+    test/test_geo_math.cpp
+    test/test_rate_monitor.cpp
+    test/test_monotonic_stamp.cpp
+    test/test_gga_builder.cpp
   )
   target_link_libraries(test_anello_decoding anello_ros_driver_component)
 endif()

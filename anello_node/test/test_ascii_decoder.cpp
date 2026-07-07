@@ -40,9 +40,17 @@ TEST(DecodeAsciiGps, ManualExampleSentence)
     EXPECT_DOUBLE_EQ(out[4], -27.9650);         // alt ellipsoid
     EXPECT_DOUBLE_EQ(out[5], 1.9240);           // alt msl
     EXPECT_DOUBLE_EQ(out[6], 0.0110);           // speed
+    EXPECT_DOUBLE_EQ(out[7], 0.0);              // heading
+    EXPECT_DOUBLE_EQ(out[8], 0.2380);           // horizontal accuracy
+    EXPECT_DOUBLE_EQ(out[9], 0.3820);           // vertical accuracy
     EXPECT_DOUBLE_EQ(out[10], 0.9700);          // pdop
     EXPECT_DOUBLE_EQ(out[11], 3.0);             // fix type (3D)
     EXPECT_DOUBLE_EQ(out[12], 29.0);            // sats
+    // Accuracy pair order matters: publish_gps maps [13] to
+    // speed_accuracy and [14] to heading_accuracy — swapping them
+    // corrupts both APGPS fields silently.
+    EXPECT_DOUBLE_EQ(out[13], 0.0820);          // speed accuracy
+    EXPECT_DOUBLE_EQ(out[14], 180.0);           // heading accuracy
     EXPECT_DOUBLE_EQ(out[15], 0.0);             // rtk status
 }
 
@@ -166,8 +174,15 @@ TEST(DecodeAsciiHdg, FieldOrderAndFlags)
     decode_ascii_hdr(val, out);
 
     EXPECT_DOUBLE_EQ(out[2], 2.13);     // relPosN
+    EXPECT_DOUBLE_EQ(out[3], 1.60);     // relPosE
+    EXPECT_DOUBLE_EQ(out[4], 3.23);     // relPosD
     EXPECT_DOUBLE_EQ(out[5], 4.19);     // baseline length
     EXPECT_DOUBLE_EQ(out[6], 36.92845); // heading
+    // Accuracy order: [7] is baseline-length accuracy, [8] heading
+    // accuracy — publish_hdr and the health monitor index them by
+    // position, so a swap would go unnoticed downstream.
+    EXPECT_DOUBLE_EQ(out[7], 0.2796);   // baseline length accuracy
+    EXPECT_DOUBLE_EQ(out[8], 4.00156);  // heading accuracy
     EXPECT_DOUBLE_EQ(out[9], 303.0);    // flags
 }
 

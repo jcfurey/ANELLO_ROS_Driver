@@ -184,13 +184,28 @@ TEST(DecodeRtcmHdg, BaselineAccuracyTenthMillimeterScale)
 
 TEST(DecodeRtcmCov, FloatFieldsPassThrough)
 {
+    // Distinct value per field so any pairwise swap in the packed
+    // struct -> output mapping is caught; all 18 covariance terms feed
+    // the APCOV message and (via publish paths) downstream fusion.
     rtcm_apcov_t p{};
     p.Time = 1000000000ULL;
     p.covLatLat = 0.01f;
     p.covLonLon = 0.02f;
     p.covAltAlt = 0.03f;
+    p.covLatLon = 0.04f;
+    p.covLatAlt = 0.05f;
+    p.covLonAlt = 0.06f;
     p.covVnVn = 0.07f;
+    p.covVeVe = 0.08f;
+    p.covVdVd = 0.09f;
+    p.covVnVe = 0.10f;
+    p.covVnVd = 0.11f;
+    p.covVeVd = 0.12f;
+    p.covRollRoll = 0.13f;
+    p.covPitchPitch = 0.14f;
     p.covYawYaw = 0.15f;
+    p.covRollPitch = 0.16f;
+    p.covRollYaw = 0.17f;
     p.covPitchYaw = 0.18f;
 
     a1buff_t a1 = make_a1buff(p);
@@ -198,10 +213,9 @@ TEST(DecodeRtcmCov, FloatFieldsPassThrough)
     decode_rtcm_cov_msg(out, a1);
 
     EXPECT_DOUBLE_EQ(out[0], 1000.0);
-    EXPECT_NEAR(out[1], 0.01, 1e-7);
-    EXPECT_NEAR(out[2], 0.02, 1e-7);
-    EXPECT_NEAR(out[3], 0.03, 1e-7);
-    EXPECT_NEAR(out[7], 0.07, 1e-7);
-    EXPECT_NEAR(out[15], 0.15, 1e-7);
-    EXPECT_NEAR(out[18], 0.18, 1e-7);
+    // The decoded array follows the packed-struct order exactly:
+    // position block (diagonal then cross terms), velocity block,
+    // attitude block.
+    for (int i = 1; i <= 18; ++i)
+        EXPECT_NEAR(out[i], i * 0.01, 1e-7) << "cov field index " << i;
 }

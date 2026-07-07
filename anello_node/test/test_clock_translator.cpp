@@ -96,6 +96,27 @@ TEST(ClockTranslator, ToleratesCrossStreamBackwardsSteps)
     EXPECT_FALSE(ct.ready());
 }
 
+TEST(ClockTranslator, ResetThresholdSeparatesLagFromReboot)
+{
+    ClockTranslator ct;
+    for (int i = 0; i < 150; ++i) {
+        ct.update(i * 0.01, 100.0 + i * 0.01 + 0.002);
+    }
+    ASSERT_TRUE(ct.ready());
+    const double last_device = 1.49;
+
+    // A 0.9 s backwards step is still cross-stream reordering territory
+    // (GNSS PVT latency keeps APGPS/APHDG MCU times under 1 s behind
+    // the concurrent IMU stream) and must NOT reset the translator.
+    ct.update(last_device - 0.9, 100.0 + (last_device - 0.9) + 0.002);
+    EXPECT_TRUE(ct.ready());
+
+    // A 1.1 s backwards step exceeds kResetThreshold: only a device
+    // reboot moves time that far back, so the translator must restart.
+    ct.update(last_device - 1.1, 100.0 + (last_device - 1.1) + 0.002);
+    EXPECT_FALSE(ct.ready());
+}
+
 TEST(ClockTranslator, DriftCreepStaysBounded)
 {
     ClockTranslator ct;

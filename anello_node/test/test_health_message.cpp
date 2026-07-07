@@ -51,10 +51,11 @@ void feed_ins(health_message &h, double heading, double status = 2.0)
 }
 
 // hdg_msg layout: [5]=baseline, [6]=heading, [8]=heading_acc, [9]=flags
-void feed_hdg(health_message &h, double heading, uint16_t flags)
+void feed_hdg(health_message &h, double heading, uint16_t flags,
+              double baseline = 1.0)
 {
     double msg[16] = {};
-    msg[5] = 1.0;
+    msg[5] = baseline;
     msg[6] = heading;
     msg[8] = 0.1;
     msg[9] = static_cast<double>(flags);
@@ -228,6 +229,69 @@ TEST(HeadingHealth, InvalidHdgFlagsAreIgnored)
     for (int i = 0; i < 10; ++i) {
         feed_hdg(h, 90.0, no_heading_valid);
         feed_ins(h, 0.0);
+    }
+    EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
+}
+
+TEST(HeadingHealth, BaselineDisagreementGatesDualAntennaCheck)
+{
+    health_message h;
+    h.set_baseline(1.0);
+    feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);
+
+    // The receiver reports a ~1.5 m baseline against a configured
+    // 1.0 m: the RTK heading solution is geometrically wrong (bad
+    // config or multipath), so its heading mismatches must be
+    // discarded rather than flagging the INS as unstable.
+    for (int i = 0; i < 5; ++i) {
+        feed_hdg(h, 90.0, kHdgValidFlags, /*baseline=*/1.5);
+        feed_ins(h, 0.0);
+    }
+    EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
+}
+
+TEST(HeadingHealth, BaselineWithinToleranceStillTrips)
+{
+    health_message h;
+    h.set_baseline(1.0);
+    feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);
+
+    // 1.01 m is inside the 3 cm baseline gate, so the same repeated
+    // mismatch is a real fault — the gate above must not swallow it.
+    for (int i = 0; i < 5; ++i) {
+        feed_hdg(h, 90.0, kHdgValidFlags, /*baseline=*/1.01);
+        feed_ins(h, 0.0);
+    }
+    EXPECT_EQ(h.get_heading_status(), HEADING_UNSTABLE);
+}
+
+TEST(HeadingHealth, ReverseGpsCourseIsTolerated)
+{
+    health_message h;
+    feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);
+
+    // Rear-mounted antenna (or reversing vehicle): GPS course over
+    // ground reads 180 deg opposite the INS heading at speed. The
+    // comparison accepts the reciprocal direction, so this must not
+    // accumulate a mismatch streak.
+    for (int i = 0; i < 10; ++i) {
+        feed_gps(h, 5.0, 270.0, 0.5);
+        feed_ins(h, 90.0);
+    }
+    EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
+}
+
+TEST(HeadingHealth, HeadingWrapNearNorthMatches)
+{
+    health_message h;
+    feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);
+
+    // GPS 359 vs INS 1 is a 2 deg disagreement across the 0/360 wrap,
+    // not a 358 deg fault; a naive |a-b| here would trip the streak on
+    // every northbound drive.
+    for (int i = 0; i < 10; ++i) {
+        feed_gps(h, 5.0, 359.0, 0.5);
+        feed_ins(h, 1.0);
     }
     EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
 }
