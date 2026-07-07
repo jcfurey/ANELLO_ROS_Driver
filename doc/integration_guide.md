@@ -593,6 +593,12 @@ ros2 topic pub /ntrip_client/rtcm rtcm_msgs/msg/Message \
   "{header: {frame_id: 'odom'}, message: [...]}"
 ```
 
+> **QoS note:** the driver's `ntrip_client/rtcm` subscription is
+> **RELIABLE** (corrections are delivery-critical). An external client
+> must publish reliable too — a best-effort publisher will silently
+> never connect. `ros2 topic pub` defaults to reliable, so the example
+> above works as-is.
+
 ---
 
 ## 8. Odometer Input
@@ -685,7 +691,10 @@ ros2 launch anello_ros_driver anello_driver.launch.py poll_interval_ms:=1
 
 The driver publishes sensor data with `SensorDataQoS` (best-effort
 reliability, volatile durability). If your subscriber uses a different QoS
-profile, you may not receive messages. Match your subscriber:
+profile, you may not receive messages. Two exceptions: `anello/health` is
+reliable + transient_local (latched for late joiners), and the
+`ntrip_client/rtcm` *subscription* is reliable (see §7.3). Match your
+subscriber:
 
 ```cpp
 auto sub = node->create_subscription<sensor_msgs::msg::Imu>(

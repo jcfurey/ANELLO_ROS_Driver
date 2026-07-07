@@ -79,3 +79,21 @@ def test_reset_drops_stale_partial_frame():
     parser.reset()
     assert parser._buffer == b''
     assert parser.parse(frame[10:]) == []
+
+
+def test_buffer_stays_bounded_under_garbage_flood():
+    # Adversarial preamble-rich garbage and endless partial frames must
+    # not grow the carry-over buffer without bound, and a valid frame
+    # afterward must still decode.
+    parser = RTCMParser()
+    # False preambles with plausible lengths, never completing a frame
+    garbage = (b'\xd3\x03\xff' + b'\xd3' * 5 + b'\x00' * 40) * 20
+    for _ in range(200):
+        parser.parse(garbage)
+        assert len(parser._buffer) <= 10 * 1024
+    # Flush any pending false frame (a stale bogus length can hold real
+    # data hostage until enough bytes arrive), then confirm a valid
+    # frame still decodes.
+    parser.parse(b'\x00' * 2048)
+    frame = make_frame(b'\x43\x50' + b'\x02' * 15)
+    assert parser.parse(frame) == [frame]

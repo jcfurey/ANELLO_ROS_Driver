@@ -109,7 +109,11 @@ ros2 launch anello_ros_driver anello_driver.launch.py \
 
 ### Driver Parameters
 
-All parameters can be set via the launch file or on the command line.
+All parameters can be set via the launch file or on the command line at
+startup. They are declared **read-only**: the driver reads each one once
+during initialization, so a runtime `ros2 param set` is rejected with
+"parameter is read-only" instead of silently having no effect — restart
+the node to change a value.
 
 #### Communication
 
@@ -145,7 +149,7 @@ All parameters can be set via the launch file or on the command line.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `poll_interval_ms` | `5` | Main loop polling interval in milliseconds |
+| `poll_interval_ms` | `5` | Main loop polling interval in milliseconds (clamped to ≥ 1: a 0 ms timer would busy-spin the executor) |
 
 #### Timestamping
 
@@ -169,7 +173,7 @@ default (`/sys/bus/usb-serial/devices/*/latency_timer`) to 1 ms.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `use_fog_wz` | `true` | Use the optical gyro (`OG_WZ`) for the z angular rate in `imu/data` and `imu/data_raw` instead of the MEMS `WZ`. Set `false` if the FOG is disabled on the unit (`APCFG fog off`) |
-| `flip_accel_sign` | `false` | Negate all `linear_acceleration` axes in `imu/data`/`imu/data_raw`. The device's at-rest accelerometer sign convention is not in the public manual — verify on the bench: stationary `linear_acceleration.z` must read **+9.8**; if it reads −9.8, set this `true` (see the [integration guide](doc/integration_guide.md)) |
+| `flip_accel_sign` | `false` | Negate all `linear_acceleration` axes in `imu/data`/`imu/data_raw`. The device's at-rest accelerometer sign convention is not in the public manual — verify on the bench: stationary `linear_acceleration.z` must read **+9.8**; if it reads −9.8, set this `true` (see the [integration guide](doc/integration_guide.md)). The driver also self-checks at startup: a stationary, level unit publishing inverted gravity triggers a one-time warning naming the value to set |
 | `covariance.angular_velocity` | `[7.6e-7, 7.6e-7, 2.1e-8]` | Diagonal angular velocity covariance `[x, y, z]` in (rad/s)². Defaults derived from the ANELLO datasheet ARW specs at 100 Hz (MEMS X/Y: 0.3°/√hr; optical Z: 0.05°/√hr) |
 | `covariance.linear_acceleration` | `[2.5e-5, 2.5e-5, 2.5e-5]` | Diagonal linear acceleration covariance `[x, y, z]` in (m/s²)². Default derived from the 0.03 m/s/√hr VRW spec at 100 Hz |
 
@@ -218,7 +222,7 @@ All custom messages include a `std_msgs/Header` with timestamp and frame ID. Mes
 | `anello/gps2` | `anello_interfaces/APGPS` | Secondary GNSS receiver |
 | `anello/hdg` | `anello_interfaces/APHDG` | Dual-antenna heading and baseline |
 | `anello/cov` | `anello_interfaces/APCOV` | Covariance matrices (position, velocity, attitude) |
-| `anello/health` | `anello_interfaces/APHEALTH` | Device health status (1 Hz) |
+| `anello/health` | `anello_interfaces/APHEALTH` | Device health status (1 Hz **while data is flowing** — nothing is published before the first decoded message or while the device is silent; `/diagnostics` carries the no-data ERROR state). QoS: reliable + transient_local, depth 1, so a late-joining monitor immediately latches the last state |
 
 #### Standard ROS2 Messages
 
@@ -242,7 +246,7 @@ directly by tools like `robot_localization` and Nav2.
 
 | Parent | Child | Description |
 |--------|-------|-------------|
-| `odom` (configurable) | `ins_link` (configurable) | INS orientation from roll/pitch/heading |
+| `odom` (`tf_parent_frame`) | `base_link` (`tf_child_frame`) | INS pose: local-ENU translation anchored at the first valid fix (same as `/odom`) plus the ENU/FLU orientation from roll/pitch/heading |
 
 #### Diagnostics
 
@@ -261,7 +265,7 @@ The driver publishes to `/diagnostics` via `diagnostic_updater` with:
 | Topic | Type | Description |
 |-------|------|-------------|
 | `anello/odo` | `anello_interfaces/APODO` | Odometer speed input to the ANELLO device |
-| `ntrip_client/rtcm` | `rtcm_msgs/Message` | RTCM correction data from NTRIP client |
+| `ntrip_client/rtcm` | `rtcm_msgs/Message` | RTCM correction data from NTRIP client. QoS: **reliable**, depth 10 (matched by the bundled NTRIP node) — an external RTCM source publishing best-effort will not connect |
 
 ### Services
 
@@ -340,10 +344,15 @@ Full message definitions for `APIM1`, `APHDG`, `APCOV`, and `APODO` can be found
 
 ## Node Composition
 
-The driver is built as a composable node and can be loaded into a component container:
+The driver is built as a composable node and can be loaded into a component
+container. Use the **multithreaded** container: the standalone executable
+runs a `MultiThreadedExecutor` so the config-port callback group (the
+`send_cmd` service and `anello/odo` input, which can block ~500 ms on the
+device) cannot stall the data path — a single-threaded container loses
+that isolation.
 
 ```bash
-ros2 run rclcpp_components component_container
+ros2 run rclcpp_components component_container_mt
 ```
 
 ```bash
@@ -389,7 +398,8 @@ self.create_subscription(Imu, 'imu/data', self.imu_callback,
 self.create_subscription(NavSatFix, 'gps/fix', self.gps_callback,
                          qos_profile_sensor_data)
 
-# ANELLO-specific messages provide additional fields (also SensorDataQoS)
+# ANELLO-specific sensor streams are also SensorDataQoS (exception:
+# anello/health is reliable + transient_local)
 self.create_subscription(APINS, 'anello/ins', self.ins_callback,
                          qos_profile_sensor_data)
 ```

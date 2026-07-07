@@ -122,6 +122,45 @@ class NTRIPClient:
         # spliced onto this one's stream.
         self._rtcm_parser.reset()
 
+        # Every failure path must go through disconnect(): it closes the
+        # socket (no fd left to leak toward GC) and clears _connected —
+        # a half-open session reported as connected would defeat the
+        # ROS node's retry gate.
+        if not self._open_socket():
+            return False
+
+        # Send the HTTP Request (sendall: a partial send() would
+        # truncate the request and corrupt the caster session)
+        try:
+            self._server_socket.sendall(self._form_request())
+        except OSError as e:
+            self._logerr(
+                'Unable to send request to server at '
+                'http://{}:{}'.format(self._host, self._port))
+            self._logerr('Exception: {}'.format(str(e)))
+            self.disconnect()
+            return False
+
+        response = self._read_response_headers()
+        if response is None or not self._classify_response(response):
+            self.disconnect()
+            return False
+
+        # Fresh connection: the RTCM-timeout gate must stay disarmed
+        # until this connection delivers its first packet (a stale
+        # pre-reconnect timestamp would otherwise tear the new
+        # connection down immediately if the reconnect took longer
+        # than rtcm_timeout_seconds), and the failure counters
+        # belong to the dead connection.
+        self._first_rtcm_received = False
+        self._read_zero_bytes_count = 0
+        self._nmea_send_failed_count = 0
+        self._loginfo(
+            'Connected to http://{}:{}/{}'.format(
+                self._host, self._port, self._mountpoint))
+        return True
+
+    def _open_socket(self):
         # Create a socket object that we will use to connect to the server
         self._server_socket = socket.socket(
             socket.AF_INET, socket.SOCK_STREAM
@@ -131,11 +170,12 @@ class NTRIPClient:
         # Connect the socket to the server
         try:
             self._server_socket.connect((self._host, self._port))
-        except Exception as e:
+        except OSError as e:
             self._logerr(
                 'Unable to connect socket to server at '
                 'http://{}:{}'.format(self._host, self._port))
             self._logerr('Exception: {}'.format(str(e)))
+            self.disconnect()
             return False
 
         # If SSL, wrap the socket. wrap_socket() performs the TLS
@@ -157,27 +197,20 @@ class NTRIPClient:
                 self._server_socket = self._ssl_context.wrap_socket(
                     self._raw_socket, server_hostname=self._host
                 )
-            except Exception as e:
+            except OSError as e:
                 self._logerr(
                     'Unable to set up SSL connection to server at '
                     'https://{}:{}'.format(self._host, self._port))
                 self._logerr('Exception: {}'.format(str(e)))
                 self.disconnect()
                 return False
+        return True
 
-        # Send the HTTP Request (sendall: a partial send() would
-        # truncate the request and corrupt the caster session)
-        try:
-            self._server_socket.sendall(self._form_request())
-        except Exception as e:
-            self._logerr(
-                'Unable to send request to server at '
-                'http://{}:{}'.format(self._host, self._port))
-            self._logerr('Exception: {}'.format(str(e)))
-            return False
-
-        # Get the response from the server
-        response = ''
+    def _read_response_headers(self):
+        # Returns the decoded response header block, or None on a socket
+        # error. Side effects: stashes any stream bytes that arrived
+        # after the headers in _pending_stream_data and initializes the
+        # chunked-transfer state.
         try:
             raw_response = self._server_socket.recv(_CHUNK_SIZE)
             # An HTTP/1.x header block ends with \r\n\r\n but may span
@@ -192,12 +225,12 @@ class NTRIPClient:
                 if not more:
                     break
                 raw_response += more
-        except Exception as e:
+        except OSError as e:
             self._logerr(
                 'Unable to read response from server at '
                 'http://{}:{}'.format(self._host, self._port))
             self._logerr('Exception: {}'.format(str(e)))
-            return False
+            return None
 
         # The first packet may already contain stream data after the
         # response headers; split on the header terminator so binary
@@ -220,8 +253,12 @@ class NTRIPClient:
             for line in response.split('\r\n')
         )
         self._chunk_buffer = b''
+        return response
 
-        # Properly handle the response
+    def _classify_response(self, response):
+        # Returns True when the response is an unambiguous success.
+        # Sets _connected on a success string; the caller resets it (via
+        # disconnect()) when classification fails overall.
         if any(success in response for success in _SUCCESS_RESPONSES):
             self._connected = True
 
@@ -277,44 +314,32 @@ class NTRIPClient:
                     self._host, self._port, self._mountpoint))
             self._logerr('Response: {}'.format(response))
             return False
-        else:
-            # Fresh connection: the RTCM-timeout gate must stay disarmed
-            # until this connection delivers its first packet (a stale
-            # pre-reconnect timestamp would otherwise tear the new
-            # connection down immediately if the reconnect took longer
-            # than rtcm_timeout_seconds), and the failure counters
-            # belong to the dead connection.
-            self._first_rtcm_received = False
-            self._read_zero_bytes_count = 0
-            self._nmea_send_failed_count = 0
-            self._loginfo(
-                'Connected to http://{}:{}/{}'.format(
-                    self._host, self._port, self._mountpoint))
-            return True
+        return True
 
     def disconnect(self):
-        # Disconnect the socket
+        # Disconnect the socket. Each socket gets its own shutdown and
+        # close attempt: a routine shutdown failure on one (e.g.
+        # ENOTCONN after the peer closed) must not skip the other.
         self._connected = False
-        try:
-            if self._server_socket:
-                self._server_socket.shutdown(socket.SHUT_RDWR)
-            if self._raw_socket:
-                self._raw_socket.shutdown(socket.SHUT_RDWR)
-        except Exception as e:
-            self._logdebug(
-                'Encountered exception when shutting down the '
-                'socket. This can likely be ignored')
-            self._logdebug('Exception: {}'.format(e))
-        try:
-            if self._server_socket:
-                self._server_socket.close()
-            if self._raw_socket:
-                self._raw_socket.close()
-        except Exception as e:
-            self._logdebug(
-                'Encountered exception when closing the socket. '
-                'This can likely be ignored')
-            self._logdebug('Exception: {}'.format(e))
+        for sock in (self._server_socket, self._raw_socket):
+            if not sock:
+                continue
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception as e:
+                self._logdebug(
+                    'Encountered exception when shutting down the '
+                    'socket. This can likely be ignored')
+                self._logdebug('Exception: {}'.format(e))
+            try:
+                sock.close()
+            except Exception as e:
+                self._logdebug(
+                    'Encountered exception when closing the socket. '
+                    'This can likely be ignored')
+                self._logdebug('Exception: {}'.format(e))
+        self._server_socket = None
+        self._raw_socket = None
 
     def reconnect(self):
         if self._connected:
@@ -334,7 +359,7 @@ class NTRIPClient:
                 ):
                     attempts = self._reconnect_attempt_count
                     self._reconnect_attempt_count = 0
-                    raise Exception(
+                    raise ConnectionError(
                         "Reconnect was attempted {} times, but "
                         "never succeeded".format(attempts))
                 self._logerr(
@@ -415,11 +440,7 @@ class NTRIPClient:
 
         # Check if there is any data available on the socket
         if not self._data_available():
-            if pending:
-                if self._response_chunked:
-                    pending = self._dechunk(pending)
-                return self._rtcm_parser.parse(pending) if pending else []
-            return []
+            return self._parse_stream(pending) if pending else []
 
         # Since we only ever pass the server socket to the list of
         # read sockets, we can just read from that.
@@ -436,10 +457,11 @@ class NTRIPClient:
                     break
                 if not self._data_available():
                     break
-            except Exception:
+            except Exception as e:
                 self._logerr(
                     'Error while reading {} bytes from '
                     'socket'.format(_CHUNK_SIZE))
+                self._logerr('Exception: {}'.format(str(e)))
                 if not self._socket_is_open():
                     self._logerr(
                         'Socket appears to be closed. '
@@ -473,10 +495,12 @@ class NTRIPClient:
             self._recv_rtcm_last_packet_timestamp = time.time()
             self._first_rtcm_received = True
 
+        return self._parse_stream(pending + data)
+
+    def _parse_stream(self, data):
         # Parse the byte stream into complete, checksum-verified RTCM
         # frames so each published rtcm_msgs/Message holds exactly one
         # RTCM message (partial frames are cached until the rest arrives)
-        data = pending + data
         if self._response_chunked:
             data = self._dechunk(data)
         return self._rtcm_parser.parse(data) if data else []
