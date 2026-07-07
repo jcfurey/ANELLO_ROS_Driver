@@ -51,3 +51,29 @@ def test_non_hex_checksum_rejected_not_raised():
     assert not parser.is_valid_sentence('$GPGGA,fake*XX\r\n')
     assert not parser.is_valid_sentence('$GPGGA,fake*\r\n')
     assert not parser.is_valid_sentence('$GPGGA,fake*-1\r\n')
+
+
+def test_length_boundary():
+    # NMEA 0183 caps a sentence at 82 characters: exactly 82 must pass,
+    # 83 must be rejected. The C++ GGA builder promises to stay within
+    # this limit, so the boundary is an interop contract.
+    parser = NMEAParser()
+    body = 'GPGGA,' + '9' * 70  # -> 82 chars once framed
+    sentence = make_sentence(body)
+    assert len(sentence) == 82
+    assert parser.is_valid_sentence(sentence)
+    assert not parser.is_valid_sentence(make_sentence(body + '9'))
+
+
+def test_extra_star_uses_last_separator():
+    # A '*' inside the body must not confuse the checksum split: the
+    # LAST separator delimits the checksum field.
+    parser = NMEAParser()
+    assert parser.is_valid_sentence(make_sentence('GPTXT,note*worthy'))
+
+
+def test_lowercase_hex_checksum_accepted():
+    parser = NMEAParser()
+    sentence = make_sentence(GGA_BODY)
+    lowered = sentence[:-4] + sentence[-4:-2].lower() + '\r\n'
+    assert parser.is_valid_sentence(lowered)

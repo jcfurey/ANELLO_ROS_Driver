@@ -120,6 +120,7 @@ class NTRIPRos(Node):
             self.get_parameter('nmea_min_interval_seconds').value
         self._last_nmea_send = None
         self._next_connect_attempt = None
+        self._rtcm_timer = None
 
     def run(self):
         if not self._client.connect():
@@ -133,7 +134,7 @@ class NTRIPRos(Node):
 
     def stop(self):
         self.get_logger().info('Shutting down NTRIP client')
-        if hasattr(self, '_rtcm_timer') and self._rtcm_timer:
+        if self._rtcm_timer:
             self._rtcm_timer.cancel()
             self._rtcm_timer.destroy()
         self._client.disconnect()

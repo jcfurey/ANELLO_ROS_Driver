@@ -19,6 +19,9 @@ setup(
     keywords=['ROS2', 'NTRIP', 'GNSS'],
     description='NTRIP client for the ANELLO ROS2 driver',
     license='MIT License',
+    # Deprecated in setuptools, but colcon-core reads it to select the
+    # pytest runner for this package — without it `colcon test` falls
+    # back to unittest and silently runs zero tests.
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [

@@ -98,17 +98,24 @@ ros2 topic echo /ins/fix --once --field position_covariance
 
 ### 1.7 Timestamping
 
-```bash
-ros2 topic delay /anello/imu_raw     # with default timestamp_source:=arrival
-```
+With the default `timestamp_source:=mcu`:
 
-- [ ] Delay is small and positive (ms-scale).
-- [ ] If using `timestamp_source:=mcu`: stamps are strictly increasing,
-      inter-message dt is uniform (plot `header.stamp` deltas — jitter
-      should collapse vs `arrival` mode), and stamps stay within a few
-      ms of wall time after the ~100-message warm-up.
+- [ ] Stamps are strictly increasing, inter-message dt is uniform (plot
+      `header.stamp` deltas — jitter should collapse vs `arrival`
+      mode), and stamps stay within a few ms of wall time after the
+      ~100-message warm-up.
 - [ ] Power-cycle the unit while the driver runs: stamps must recover
       (translator resets on MCU time going backwards), not jump.
+
+If running with `timestamp_source:=arrival` instead:
+
+```bash
+ros2 topic delay /anello/imu_raw
+```
+
+- [ ] Delay is small and positive (ms-scale). Note that messages
+      decoded from the same port read share one arrival stamp, so
+      near-zero dt between consecutive messages is expected here.
 
 ## 2. Static outdoor checks (clear sky view)
 
@@ -229,3 +236,18 @@ by intentional behavior changes:
 - [ ] NTRIP VRS casters still stream with the 10 s GGA interval (set
       `nmea_min_interval_seconds` lower if your caster requires faster
       updates).
+- [ ] The TF child (and `/odom` `child_frame_id`) is now `base_link`;
+      consumers that expected `odom -> ins_link` need
+      `tf_child_frame:=ins_link` (only when no URDF parents
+      `ins_link`).
+- [ ] `timestamp_source` now defaults to `mcu`; pass
+      `timestamp_source:=arrival` to restore host-arrival stamps.
+- [ ] The `ntrip_client/rtcm` subscription is now RELIABLE — an
+      external RTCM publisher using best-effort no longer connects
+      (the bundled NTRIP node already matches).
+- [ ] `anello/health` is latched (transient_local) and published only
+      while data flows; monitors that expected an unconditional 1 Hz
+      heartbeat should watch `/diagnostics` instead.
+- [ ] All driver parameters are read-only at runtime: scripts that used
+      `ros2 param set` on the driver must restart it with new values
+      instead.

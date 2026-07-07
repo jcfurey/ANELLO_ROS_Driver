@@ -197,10 +197,10 @@ What the driver does in ETH mode:
 
 Recommended companion parameters for Ethernet operation:
 
-- `timestamp_source:=mcu` — removes network/OS arrival jitter from
-  inter-message timing (see the readme's Timestamping section). Newer
-  firmware also offers PTP (`ptp` unit config) for hardware time sync
-  if your network is PTP-capable.
+- `timestamp_source` — `mcu` (the default) removes network/OS arrival
+  jitter from inter-message timing (see the readme's Timestamping
+  section). Newer firmware also offers PTP (`ptp` unit config) for
+  hardware time sync if your network is PTP-capable.
 - NTRIP for RTK: add `ntrip_host`/`ntrip_mountpoint`/credentials launch
   arguments; corrections flow host → unit over the data channel, so no
   serial link is needed (leave the unit's own `ntrip` input channel
@@ -235,8 +235,9 @@ the [integration guide](integration_guide.md) for the full treatment.
 The short version:
 
 1. **TF/URDF:** add the unit to your URDF at its mounted pose; the
-   driver broadcasts `odom -> ins_link` only if `publish_tf:=true`
-   (disable it when `robot_localization` owns `odom -> base_link`).
+   driver broadcasts `odom -> base_link` (`tf_parent_frame` ->
+   `tf_child_frame`) only if `publish_tf:=true` (disable it when
+   `robot_localization` owns `odom -> base_link`).
 2. **Pick one fusion topology** (integration guide §5): trust the INS
    (`ins/fix` + driver TF, no second EKF), or re-fuse `imu/data` +
    `gps/fix` through `ekf_node` + `navsat_transform_node` — never both.
@@ -282,5 +283,5 @@ ros2 topic echo /anello/health --once
 | Data flows, config service times out | `rport2` mismatch, or another host on the subnet configured as `rip`. The unit answers only the configured computer IP. |
 | Driver logs "Ethernet bind failed" | Port already in use, or a second driver instance running. |
 | Messages arrive but parse-fail | `mfm` mismatch is harmless (driver reads both), but pre-2023-04-13 units cannot emit binary — set `mfm` to `1` (ASCII). |
-| Rates below configured `odr` | `odr` change without reset, or host NIC power management (`ethtool`, disable EEE) — also prefer `timestamp_source:=mcu` so jitter doesn't masquerade as rate variation. |
+| Rates below configured `odr` | `odr` change without reset, or host NIC power management (`ethtool`, disable EEE) — and keep `timestamp_source` at its `mcu` default so jitter doesn't masquerade as rate variation. |
 | Unit unreachable after a bad IP config | Connect over USB with the user tool and fix `lip`/`rip` — USB always works regardless of the Ethernet personality. |
