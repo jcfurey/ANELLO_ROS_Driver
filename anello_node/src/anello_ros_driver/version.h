@@ -6,7 +6,7 @@
 #endif
 
 #ifndef MINOR_VERSION
-#define MINOR_VERSION 1
+#define MINOR_VERSION 2
 #endif
 
 #ifndef PATCH_VERSION
@@ -14,11 +14,21 @@
 #endif
 
 /*
+v3.2.0 : UART reconnect after unit power-cycle
+            1. Detect tty hangup (USB re-enumeration) and close the stale
+               fd instead of reading it forever
+            2. Un-latch the confirmed data port after sustained silence
+               and restart the AUTO scan; fixed-name ports are reopened
+               periodically (use /dev/serial/by-id for stable names)
+            3. Re-enumerate /dev/ttyUSB* on every scan step so a unit
+               that re-enumerates under a new name is found
+            4. pty-based reconnect regression tests
+
 v3.1.0 : Audit fixes, hardening, and EVK alignment
             1. Fix RTCM QoS mismatch (corrections now reach the device)
             2. Memory-safety fixes in the ASCII/RTCM parser and sockets
-            3. Convert standard interfaces to REP-103 ENU/FLU; anello/*
-               topics stay device-native (NED/FRD)
+            3. Convert standard interfaces to REP-103 ENU/FLU; the
+               anello custom topics stay device-native (NED/FRD)
             4. NavSatFix status from the full APINS status enumeration
             5. Drain data port per tick; non-blocking ethernet reads
             6. Route APODO to the dedicated odometer channel over ethernet

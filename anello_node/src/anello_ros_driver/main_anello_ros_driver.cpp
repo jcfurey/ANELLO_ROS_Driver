@@ -52,6 +52,7 @@
 
 #include "bit_tools.h"
 #include "clock_translator.h"
+#include "version.h"
 #include "messaging/rtcm_decoder.h"
 #include "messaging/ascii_decoder.h"
 #include "messaging/message_publisher.h"
@@ -194,7 +195,8 @@ public:
         setup_diagnostics();
         setup_timers();
 
-        RCLCPP_INFO(get_logger(), "ANELLO ROS2 driver initialized (v3.1.0)");
+        RCLCPP_INFO(get_logger(), "ANELLO ROS2 driver initialized (v%d.%d.%d)",
+                    MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION);
     }
 
     ~AnelloRosDriver() override = default;
@@ -217,7 +219,10 @@ private:
         declare_parameter("com_type", "UART",
             d("Communication type: UART or ETH"));
         declare_parameter("uart_data_port", "AUTO",
-            d("UART data port path or AUTO for auto-detection"));
+            d("UART data port path or AUTO for auto-detection. For a fixed "
+              "path prefer a /dev/serial/by-id/ symlink: it survives the "
+              "USB re-enumeration a unit power-cycle causes, so the "
+              "driver's automatic reopen finds the device again"));
         declare_parameter("uart_config_port", "AUTO",
             d("UART config port path, AUTO, or OFF"));
         declare_parameter("baud_rate", 230400,

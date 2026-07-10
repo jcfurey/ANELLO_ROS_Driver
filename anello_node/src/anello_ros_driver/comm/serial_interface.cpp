@@ -115,6 +115,16 @@ size_t serial_interface::get_data(char *buf, size_t buf_len)
     ssize_t bytes_read = read(this->usb_fd, buf, buf_len - 1);
     if (bytes_read < 0)
     {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+        {
+            return 0;
+        }
+        // EIO/ENXIO: the tty lost its device (USB unplug, or the unit
+        // power-cycled and re-enumerated). This fd can never produce
+        // data again — close so the owner reopens or rescans.
+        WARNING_PRINT("Serial port %s read failed (%s) — closing port",
+                      this->portname.c_str(), strerror(errno));
+        this->close_port();
         return 0;
     }
     buf[bytes_read] = '\0';
@@ -144,7 +154,18 @@ size_t serial_interface::get_data(char *buf, size_t buf_len, int timeout)
         return 0;
     }
 
-    return serial_interface::get_data(buf, buf_len);
+    size_t bytes_read = serial_interface::get_data(buf, buf_len);
+    if (bytes_read == 0 && this->port_enabled)
+    {
+        // select() reported readable but read() produced nothing: that is
+        // the tty hangup signature (device gone), not a timeout — a
+        // timeout returns above with ready == 0. The EIO case has already
+        // closed the port inside get_data(); this catches the EOF form.
+        WARNING_PRINT("Serial port %s hangup — closing port",
+                      this->portname.c_str());
+        this->close_port();
+    }
+    return bytes_read;
 }
 
 void serial_interface::write_data(const char *buf, size_t buf_len)

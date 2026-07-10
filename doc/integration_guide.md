@@ -39,7 +39,11 @@ The ANELLO EVK exposes two USB-serial ports when connected via USB:
 | Config port | Accepts commands, returns responses | `/dev/ttyUSB3` |
 
 The exact device paths depend on your system. The driver's `AUTO` mode will
-detect the correct ports automatically.
+detect the correct ports automatically, and re-scans if the unit
+power-cycles mid-run (the tty numbers usually shift when the USB
+re-enumerates). If you pin `uart_data_port` instead, use the stable
+`/dev/serial/by-id/` symlink rather than a raw `ttyUSB` number so the
+driver's automatic reopen finds the device after a power-cycle.
 
 **USB connection:**
 

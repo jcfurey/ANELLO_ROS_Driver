@@ -44,6 +44,16 @@
 #define MAX_PORT_PARSE_FAIL 5
 #endif
 
+/* Failed blocking reads on a CONFIRMED data port before the stream is
+ * declared lost and the scan/reopen restarts. One fail accrues per
+ * ~5-15 ms poll tick, so 200 is roughly 1-3 s of sustained silence —
+ * deliberately generous next to MAX_PORT_PARSE_FAIL (which paces the
+ * unconfirmed scan) so a burst of checksum noise cannot drop a live
+ * link, while still recovering well within a unit's ~10 s reboot. */
+#ifndef MAX_CONFIRMED_PORT_FAIL
+#define MAX_CONFIRMED_PORT_FAIL 200
+#endif
+
 class serial_interface : base_interface
 {
 protected:

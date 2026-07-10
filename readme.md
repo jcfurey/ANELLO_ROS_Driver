@@ -120,8 +120,17 @@ the node to change a value.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `com_type` | `UART` | Communication type: `UART` or `ETH` |
-| `uart_data_port` | `AUTO` | UART data port path, or `AUTO` for auto-detection |
+| `uart_data_port` | `AUTO` | UART data port path, or `AUTO` for auto-detection. For a fixed path prefer a `/dev/serial/by-id/` symlink — it survives USB re-enumeration after a unit power-cycle |
 | `uart_config_port` | `AUTO` | UART config port path, `AUTO`, or `OFF` to disable |
+
+In UART mode the data port self-heals across a unit power-cycle: a tty
+hangup (USB re-enumeration) or a few seconds of sustained silence on a
+previously confirmed port restarts the `AUTO` scan — re-listing
+`/dev/ttyUSB*` each step, since the unit usually returns under a new
+name — or, for a fixed path, periodically reopens it until the device
+answers. The loss and the recovery are both logged at WARN. The config
+port (`anello/send_cmd`) does not yet reconnect; a node restart is still
+required to restore command service after a power-cycle.
 | `baud_rate` | `230400` | Serial baud rate (`115200`, `230400`, `460800`, `921600`). The EVK ships at `921600`; the Ground INS/IMU default is `230400` — see [doc/anello_evk_reference.md](doc/anello_evk_reference.md) |
 | `remote_ip` | `192.168.1.111` | Device IP address (ethernet mode). For full Ethernet setup — unit configuration with the ANELLO user tool, host networking, port mapping — see the [Ethernet Setup Guide](doc/ethernet_setup_guide.md) |
 | `local_data_port` | `1111` | Local UDP data port (ethernet mode) |

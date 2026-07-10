@@ -100,6 +100,7 @@ if(BUILD_TESTING)
     test/test_rtcm_decoder.cpp
     test/test_health_message.cpp
     test/test_clock_translator.cpp
+    test/test_serial_reconnect.cpp
   )
   target_link_libraries(test_anello_decoding anello_ros_driver_component)
 endif()
