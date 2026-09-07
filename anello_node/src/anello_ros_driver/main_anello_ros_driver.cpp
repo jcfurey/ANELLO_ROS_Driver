@@ -24,9 +24,12 @@
 #include <map>
 #include <limits>
 #include <atomic>
+#include <filesystem>
+#include <locale>
 #include "rclcpp/version.h"
 #include "navigation_math.h"
 #include "sample_state.h"
+#include "device_input.h"
 #include "messaging/protocol_decoder.h"
 #include "anello_interfaces/msg/apahrs.hpp"
 
@@ -190,11 +193,10 @@ public:
         // The send_cmd service and the APODO subscription both drive the
         // UART config port and can block up to ~500 ms waiting on the
         // device. Put them in their own mutually-exclusive group so, under
-        // the MultiThreadedExecutor in main(), they run concurrently with —
-        // and never stall — the data poll / publish path (the node's
-        // default group, the sole accessor of the data port and the
-        // decode/health state). The two groups share no mutable state, so
-        // this remains race-free even under a single-threaded executor.
+        // the MultiThreadedExecutor in main(), command waits can run alongside
+        // data polling/publication. The default group owns decode/health state;
+        // RTCM forwarding has another group. Shared serial handles are guarded
+        // by locks/generations, and transmission counters are atomic.
         config_cb_group_ = create_callback_group(
             rclcpp::CallbackGroupType::MutuallyExclusive);
         setup_ports();
@@ -278,6 +280,16 @@ private:
         declare_parameter("accel_sign_check_upright", false,
             d("Enable gravity-sign warning only when the IMU is known to be mounted upright at startup"));
         declare_parameter("publish_custom_messages", true, d("Publish device-native anello message topics"));
+        declare_parameter("command_mode", "read_only",
+            d("read_only permits queries/echo; unrestricted explicitly permits device configuration/reset commands"));
+        declare_parameter("rtcm.max_bytes_per_second", 8192.0,
+            d("RTCM admission budget, with a 4096-byte burst; UART is also capped at half the configured 8N1 byte rate"));
+        declare_parameter("rtcm.max_frames_per_second", 100.0,
+            d("RTCM frame admission rate, with a 16-frame burst; prevents floods of tiny frames"));
+        declare_parameter("odometer.max_speed_mps", 100.0,
+            d("Reject odometer speeds outside this absolute limit; firmware odo units must be m/s"));
+        declare_parameter("odometer.max_rate_hz", 50.0,
+            d("Maximum odometer send rate; excess samples are dropped without delayed replay"));
 
         declare_parameter("poll_interval_ms", 5,
             d("Main loop polling interval in milliseconds"));
@@ -348,6 +360,13 @@ private:
             throw std::invalid_argument("heading_baseline must be finite and nonnegative");
         config_.data_port_name = get_parameter("uart_data_port").as_string();
         config_.config_port_name = get_parameter("uart_config_port").as_string();
+        if (config_.type==UART && config_.data_port_name!="AUTO" &&
+            config_.config_port_name!="AUTO" && config_.config_port_name!="OFF") {
+            std::error_code error;
+            if (config_.data_port_name==config_.config_port_name ||
+                std::filesystem::equivalent(config_.data_port_name,config_.config_port_name,error))
+                throw std::invalid_argument("uart_data_port and uart_config_port must identify distinct serial devices");
+        }
         config_.baud_rate = static_cast<uint32_t>(get_parameter("baud_rate").as_int());
         config_.remote_ip = get_parameter("remote_ip").as_string();
         config_.local_data_port = static_cast<int>(get_parameter("local_data_port").as_int());
@@ -406,6 +425,21 @@ private:
             return value;
         };
         stream_timeout_=positive("stream_timeout"); imu_max_age_=positive("imu_max_age");
+        command_mode_=get_parameter("command_mode").as_string();
+        if (command_mode_!="read_only" && command_mode_!="unrestricted")
+            throw std::invalid_argument("command_mode must be read_only or unrestricted");
+        const double requested_rtcm_rate=positive("rtcm.max_bytes_per_second");
+        if (requested_rtcm_rate>65536) throw std::invalid_argument("rtcm.max_bytes_per_second must be <=65536");
+        rtcm_rate_=config_.type==UART?std::min(requested_rtcm_rate,config_.baud_rate/20.0):requested_rtcm_rate;
+        rtcm_budget_=TrafficBudget(rtcm_rate_,4096);
+        const double frame_rate=positive("rtcm.max_frames_per_second");
+        if (frame_rate>1000) throw std::invalid_argument("rtcm.max_frames_per_second must be <=1000");
+        rtcm_frame_budget_=TrafficBudget(frame_rate,16);
+        odo_max_speed_=positive("odometer.max_speed_mps");
+        if (odo_max_speed_>1000) throw std::invalid_argument("odometer.max_speed_mps must be <=1000");
+        const double odo_rate=positive("odometer.max_rate_hz");
+        if (odo_rate>100) throw std::invalid_argument("odometer.max_rate_hz must be <=100");
+        odo_budget_=TrafficBudget(odo_rate,1);
         cov_max_age_=positive("covariance.max_age"); unknown_variance_=positive("covariance.unknown_variance");
         const double rate_scale=positive("imu_output_rate_hz")/100.0;
         const auto convention=get_parameter("covariance.device_convention").as_string();
@@ -437,20 +471,19 @@ private:
     void setup_ports()
     {
         try {
-            config_port_ = std::make_unique<anello_config_port>(&config_);
-            config_port_->init();
-
-        } catch (const std::exception &e) {
-            RCLCPP_ERROR(get_logger(), "Config port init failed: %s", e.what());
-            // Config port failure is not fatal — command service won't work
-        }
-
-        try {
             data_port_ = std::make_unique<anello_data_port>(&config_);
             data_port_->init();
         } catch (const std::exception &e) {
             RCLCPP_FATAL(get_logger(), "Data port init failed: %s", e.what());
             throw;
+        }
+
+        // Claim the data candidate before AUTO config probing can open it.
+        try {
+            config_port_ = std::make_unique<anello_config_port>(&config_);
+            config_port_->init();
+        } catch (const std::exception &e) {
+            RCLCPP_ERROR(get_logger(), "Config port init failed: %s", e.what());
         }
 
         // Over ethernet the unit accepts odometer input only on its
@@ -509,10 +542,24 @@ private:
         sub_rtcm_ = create_subscription<rtcm_msgs::msg::Message>(
             "ntrip_client/rtcm", rclcpp::QoS(10).reliable(),
             [this](const rtcm_msgs::msg::Message::SharedPtr msg) {
-                if (msg->message.empty() || msg->message.size()>4096) { ++tx_failures_; return; }
-                if (!data_port_ || !data_port_->write_data(
-                        reinterpret_cast<const char *>(msg->message.data()),
-                        msg->message.size())) ++tx_failures_;
+                size_t frame_count=0;
+                if (!valid_rtcm_input(msg->message.data(),msg->message.size(),&frame_count)) {
+                    ++tx_input_rejections_; return;
+                }
+                if (!rtcm_frame_budget_.take(frame_count) || !rtcm_budget_.take(msg->message.size())) {
+                    ++tx_rate_drops_; return;
+                }
+                // Send one complete frame at a time. A maximum RTCM frame is
+                // 1029 bytes, so bundles cannot cause ordinary Ethernet MTU
+                // fragmentation or unnecessarily long individual UART writes.
+                for (size_t offset=0;offset<msg->message.size();) {
+                    const size_t length=6+((msg->message[offset+1]&3u)<<8)+msg->message[offset+2];
+                    if (!data_port_ || !data_port_->write_data(
+                            reinterpret_cast<const char *>(msg->message.data()+offset),length)) {
+                        ++tx_failures_; break;
+                    }
+                    offset+=length;
+                }
             },rtcm_options);
 
         // APODO drives the config port (serial mode), so it shares the
@@ -522,8 +569,12 @@ private:
         sub_odo_ = create_subscription<anello_interfaces::msg::APODO>(
             "anello/odo", 1,
             [this](const anello_interfaces::msg::APODO::SharedPtr msg) {
-                if (!std::isfinite(msg->odo_speed)) { ++tx_failures_; return; }
+                if (!std::isfinite(msg->odo_speed) || std::abs(msg->odo_speed)>odo_max_speed_) {
+                    ++tx_input_rejections_; return;
+                }
+                if (!odo_budget_.take(1)) { ++tx_rate_drops_; return; }
                 std::ostringstream body;
+                body.imbue(std::locale::classic());
                 body << "APODO," << std::fixed << std::setprecision(2) << msg->odo_speed;
                 std::string body_str = body.str();
                 std::string ck = compute_checksum(body_str.c_str(), body_str.length());
@@ -566,9 +617,19 @@ private:
         std::string response;
 
         std::string body = req->command;
-        if (body.size()>400 || body.rfind("AP",0)!=0 || body.find_first_of("#*")!=std::string::npos ||
-            !std::all_of(body.begin(),body.end(),[](unsigned char c){return c>=0x20 && c<=0x7e;})) {
-            res->response="ERROR: expected an AP command body without checksum or line terminators";
+        if (!valid_command_body(body)) {
+            ++tx_input_rejections_;
+            res->response="ERROR: expected a 5..128-byte AP command body without checksum or line terminators";
+            return;
+        }
+        if (command_mode_=="read_only" && !read_only_command(body)) {
+            ++tx_input_rejections_;
+            res->response="ERROR: command_mode=read_only blocks configuration, reset, and unknown commands";
+            return;
+        }
+        if (!command_budget_.take(1)) {
+            ++tx_rate_drops_;
+            res->response="ERROR: command rate limit (2 per second); request was not transmitted";
             return;
         }
         const auto identifier=body.substr(0,body.find(','));
@@ -586,6 +647,10 @@ private:
 
         if (!config_port_->write_data(full.c_str(),full.size())) {
             ++tx_failures_; res->response="ERROR: command transmission failed"; return;
+        }
+        if (body=="APRST,0") {
+            res->response="SENT: APRST,0; the device reset command has no acknowledgement";
+            return;
         }
 
         auto start = std::chrono::steady_clock::now();
@@ -694,6 +759,10 @@ private:
             stat.add("parse_failures_total", static_cast<int64_t>(rate_monitor_.total_parse_fail));
             stat.add("data_port", data_port_ ? data_port_->get_portname() : "N/A");
             stat.add("transmission_failures_total",static_cast<int64_t>(tx_failures_.load()));
+            stat.add("device_input_rejections_total",static_cast<int64_t>(tx_input_rejections_.load()));
+            stat.add("device_input_rate_drops_total",static_cast<int64_t>(tx_rate_drops_.load()));
+            stat.add("rtcm_admission_bytes_per_second",rtcm_rate_);
+            stat.add("command_mode",command_mode_);
             stat.add("truncated_datagrams_total",static_cast<int64_t>(data_port_?data_port_->truncated_datagrams():0));
             stat.add("config_connected",config_port_ && config_port_->connected());
             stat.add("config_port", config_port_ ? config_port_->get_portname() : "N/A");
@@ -1226,6 +1295,10 @@ private:
     rclcpp::CallbackGroup::SharedPtr config_cb_group_, rtcm_cb_group_;
     rclcpp::TimerBase::SharedPtr config_timer_;
     std::atomic<uint64_t> tx_failures_{0};
+    std::atomic<uint64_t> tx_input_rejections_{0},tx_rate_drops_{0};
+    TrafficBudget rtcm_budget_,rtcm_frame_budget_,odo_budget_,command_budget_{2,1};
+    std::string command_mode_="read_only";
+    double rtcm_rate_=8192,odo_max_speed_=100;
     uint64_t data_generation_=0;
 
     // Timers

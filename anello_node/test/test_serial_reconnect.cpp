@@ -14,6 +14,7 @@
 #include <thread>
 #include <filesystem>
 #include <poll.h>
+#include <termios.h>
 #include "../src/anello_ros_driver/comm/anello_config_port.h"
 
 #include "../src/anello_ros_driver/comm/anello_data_port.h"
@@ -313,4 +314,63 @@ TEST(SerialInterface, DescriptorZeroIsClosed) {
     const bool closed=fcntl(0,F_GETFD)==-1;
     if (saved>=0) { dup2(saved,0); close(saved); }
     EXPECT_TRUE(closed);
+}
+
+TEST_F(TempPortDir, SerialOwnershipRejectsAliasAndReleasesOnClose) {
+    Pty pty; ASSERT_TRUE(pty.open_pty());
+    link_port(pty.slave_path,"ttyUSB0"); link_port(pty.slave_path,"alias");
+    serial_interface owner,other;
+    owner.init(dir_+"ttyUSB0",230400);
+    EXPECT_THROW(other.init(dir_+"alias",921600),std::runtime_error);
+    EXPECT_TRUE(owner.write_data("still owned",11));
+    char bytes[32]; pollfd ready{pty.master,POLLIN,0}; ASSERT_EQ(poll(&ready,1,100),1);
+    ASSERT_EQ(read(pty.master,bytes,sizeof(bytes)),11);
+    owner.close_port(); EXPECT_NO_THROW(other.init(dir_+"alias",230400));
+}
+TEST(SerialInterface, ClearsInheritedFlowControlAndHangupOnClose) {
+    Pty pty; ASSERT_TRUE(pty.open_pty());
+    int observer=open(pty.slave_path.c_str(),O_RDWR|O_NOCTTY);
+    ASSERT_GE(observer,0);
+    termios options{}; ASSERT_EQ(tcgetattr(observer,&options),0);
+    options.c_cflag|=HUPCL; options.c_iflag|=IXON|IXOFF|IXANY;
+    ASSERT_EQ(tcsetattr(observer,TCSANOW,&options),0);
+    serial_interface port; port.init(pty.slave_path,230400);
+    EXPECT_EQ(tcgetattr(observer,&options),0); EXPECT_EQ(options.c_cflag&HUPCL,0u);
+    EXPECT_EQ(options.c_iflag&(IXON|IXOFF|IXANY),0u);
+    port.close_port(); close(observer);
+}
+TEST(SerialInterface, OldGenerationCannotWriteToReplacementPort) {
+    Pty first,second; ASSERT_TRUE(first.open_pty()); ASSERT_TRUE(second.open_pty());
+    serial_interface port; port.init(first.slave_path,230400);
+    const auto previous=port.generation(); port.init(second.slave_path,230400);
+    EXPECT_FALSE(port.write_data("old correction",14,previous));
+    pollfd ready{second.master,POLLIN,0}; EXPECT_EQ(poll(&ready,1,0),0);
+}
+TEST_F(TempPortDir, PortScanDoesNotReopenRapidlyOnGarbage) {
+    Pty pty; ASSERT_TRUE(pty.open_pty()); link_port(pty.slave_path,"ttyUSB0");
+    interface_config_t cfg; cfg.data_port_name="AUTO";
+    anello_data_port port(&cfg,dir_); port.init(); const auto opened=port.generation();
+    for (int i=0;i<1000;++i) port.port_parse_fail();
+    EXPECT_EQ(port.generation(),opened);
+    std::this_thread::sleep_for(std::chrono::milliseconds(550)); port.port_parse_fail();
+    EXPECT_GT(port.generation(),opened);
+}
+TEST(SerialInterface, ConcurrentWritersDoNotInterleaveFrames) {
+    Pty pty; ASSERT_TRUE(pty.open_pty());
+    serial_interface port; port.init(pty.slave_path,230400);
+    const std::string first(32768,'a'),second(32768,'b'); std::string received;
+    std::thread reader([&] {
+        char bytes[4096];
+        while (received.size()<first.size()+second.size()) {
+            pollfd ready{pty.master,POLLIN,0}; if (poll(&ready,1,500)<=0) break;
+            const auto count=read(pty.master,bytes,sizeof(bytes)); if (count<=0) break;
+            received.append(bytes,count);
+        }
+    });
+    bool first_sent=false,second_sent=false;
+    std::thread one([&] {first_sent=port.write_data(first.data(),first.size());});
+    std::thread two([&] {second_sent=port.write_data(second.data(),second.size());});
+    one.join(); two.join(); reader.join();
+    EXPECT_TRUE(first_sent); EXPECT_TRUE(second_sent);
+    EXPECT_TRUE(received==first+second || received==second+first);
 }

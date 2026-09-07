@@ -223,6 +223,8 @@ ros2 service call /anello/send_cmd anello_interfaces/srv/CmdAndRsp \
     "{command: 'APVEH,W,cnx,-0.80,cny,0.0,cnz,0.15'}"
 ```
 
+Configuration writes require launching with `command_mode:=unrestricted`;
+the default `read_only` mode permits queries and blocks configuration/reset.
 The driver computes and appends the checksum automatically. Read back
 any value with the `r`/`R` forms (e.g. `APVEH,R,bsl`). Set
 `heading_baseline` on the driver to your measured antenna separation so

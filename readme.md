@@ -46,6 +46,8 @@ Unspecified launch arguments preserve the parameter file or node default. Launch
 
 Both UART channels recover after a device replacement. Config `OFF` stays disabled. AUTO configuration probing runs incrementally; startup does not wait for a device. A command sent while the channel is unavailable returns an error, and odometer/correction transmission failures appear in diagnostics. The standalone executable uses a multithreaded executor. Use `component_container_mt` when loading `anello::AnelloRosDriver` so bounded command/transmit waits cannot hold the receive callback.
 
+Serial ports are exclusively claimed before changing settings or flushing. Data/config aliases of the same device are rejected; corrections wait for a confirmed data stream and cannot follow a stale port generation. See [EVK device input protection](doc/evk_device_inputs.md) for the outbound limits and remaining firmware validation.
+
 ## Standard interfaces
 
 Data and command topic names are relative to the node namespace. Diagnostics and TF use the usual global ROS topics. Sensor publishers use `SensorDataQoS` (best effort, depth 5). RTCM input/output is reliable with depth 10; health is reliable and transient local with depth 1.
@@ -95,6 +97,11 @@ Parameters are read-only while running; restart to change them.
 | `gnss_service_mask` | 0 | Configured constellation mask; zero means unspecified |
 | `accel_sign_check_upright` | `false` | Opt-in startup gravity check for a known upright installation |
 | `publish_custom_messages` | `true` | Publish the device-native topics |
+| `command_mode` | `read_only` | Queries and echo only; `unrestricted` explicitly permits configuration, reset, and other device commands |
+| `rtcm.max_bytes_per_second` | 8192 | Admission budget, burst 4096 bytes; UART also caps it at baud/20 bytes/s |
+| `rtcm.max_frames_per_second` | 100 | Admission budget, burst 16 complete RTCM frames |
+| `odometer.max_speed_mps` | 100 | Reject larger absolute speeds; configurable up to 1000 m/s |
+| `odometer.max_rate_hz` | 50 | Send at most this rate, no burst; configurable up to 100 Hz |
 
 At 100 Hz, automatic angular variances are `[7.6e-7, 7.6e-7, 2.1e-8]` with FOG, or `[7.6e-7, 7.6e-7, 7.6e-7]` with MEMS. Acceleration variances are `[2.5e-5, 2.5e-5, 2.5e-5]`. These are noise estimates, not calibrated accuracy claims; filtering and bandwidth affect them. Explicit arrays override rate scaling. Zero IMU covariance means unknown; odometry uses the configured conservative fallback instead of interpreting zero as unknown.
 
@@ -114,6 +121,6 @@ For credentials, prefer a protected ROS parameter file supplied via `ntrip_param
 
 NTRIP starts even when the caster is unavailable and retries indefinitely. Default retry delay is 5 s; the first/next valid-correction deadline is 4 s. GGA sending defaults to every 10 s and stops when the last valid sentence is older than 30 s. Network I/O runs outside ROS callbacks with bounded correction buffering; expired queued corrections are discarded. NTRIP diagnostics report connection state, valid-frame age, and queue drops/expiry. The deprecated `reconnect_attempt_max` parameter is accepted for compatibility but no longer stops retries. HTTP/1.0, HTTP/1.1, ICY, TLS certificate validation, and bounded chunk decoding are supported.
 
-Commands accept a body such as `APVEH,R,bsl`; the driver adds framing/checksum and returns a checksum-verified reply with the matching message identifier (or APERR). There is a bounded 500 ms response wait. Concurrent identical unsolicited responses cannot be correlated more precisely because the protocol has no transaction ID. `InitHeading`/`UpdHeading` interfaces remain for source compatibility but have no advertised service; use documented device commands through `send_cmd`.
+Commands accept a 5..128-byte body such as `APVEH,R,bsl`; the driver adds framing/checksum and returns a checksum-verified reply with the matching message identifier (or APERR). `command_mode=read_only` is the default. Start with `command_mode:=unrestricted` only when intentionally configuring or resetting the device. Commands are limited to two per second. The response wait is bounded to 500 ms; an explicitly permitted `APRST,0` returns `SENT` without claiming acknowledgement, because that command has no reply. The driver never retries it automatically. Concurrent identical unsolicited responses cannot be correlated more precisely because the protocol has no transaction ID. `InitHeading`/`UpdHeading` interfaces remain for source compatibility but have no advertised service; use documented device commands through `send_cmd`.
 
 See [integration](doc/integration_guide.md), [hardware validation](doc/hardware_validation_checklist.md), [Ethernet setup](doc/ethernet_setup_guide.md), and [the EVK reference](doc/anello_evk_reference.md).

@@ -26,6 +26,8 @@ DRIVER_PARAMETERS = {
     'gps_utc_leap_seconds': int, 'gnss_service_mask': int, 'imu_output_rate_hz': float,
     'accel_sign_check_upright': bool, 'publish_custom_messages': bool,
     'use_sim_time': bool,
+    'command_mode': str, 'rtcm.max_bytes_per_second': float, 'rtcm.max_frames_per_second': float,
+    'odometer.max_speed_mps': float, 'odometer.max_rate_hz': float,
 }
 NTRIP_PARAMETERS = {
     'host': str, 'port': int, 'mountpoint': str, 'authenticate': bool,

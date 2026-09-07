@@ -29,6 +29,10 @@ This release implements the September 2026 driver audit fixes. Rebuild all three
 | `reconnect_attempt_max` stopped recovery | Accepted as deprecated compatibility input; the worker continues retrying until shutdown. |
 | Python/XML launch values inferred through YAML | Typed overrides; parameter-file support; XML delegates to Python. Unspecified overrides preserve file/node values. |
 | `tests_require` selected pytest | Supported extras metadata plus `colcon.pkg`; CI/docs also explicitly select pytest and check for missing results. |
+| Arbitrary bytes on the RTCM subscription reached the device | Entire bundles must pass RTCM envelope/CRC checks; output telemetry, ASCII, partial/corrupt frames, and trailing junk are rejected. Bundles are split into individual frames. |
+| Corrections followed an unconfirmed UART scan candidate | Corrections require validated telemetry on the same open-port generation. Serial ownership prevents data/config collisions. |
+| Unbounded odometer values and outbound traffic | Finite speed/rate limits and RTCM byte/frame budgets reject excess input, with diagnostic counters. |
+| Any AP command body could change or reset firmware | `command_mode=read_only` by default; intentional configuration/reset needs `unrestricted`. Commands are bounded to 128 body bytes and two per second. Reset transmission no longer reports an expected missing reply as a timeout. |
 
 For example, a parameter file for an INS at its sensor reference point is:
 
@@ -85,3 +89,5 @@ APAHRS/subtype 8 now has a native custom message. Its relative yaw is deliberate
 Software tests exercise deterministic frames, pseudo-terminals, local sockets, installed ROS nodes, and launch files. They cannot establish firmware APCOV units/basis, mounting/output-centre configuration, six-axis sign conventions, receiver confidence definitions, or field accuracy. Keep device covariance unverified until those are established. Follow the [hardware checklist](hardware_validation_checklist.md) and [integration guide](integration_guide.md).
 
 The implementation targets Linux little-endian ROS platforms. The binary protocol uses packed little-endian device structures; unsupported host endianness fails compilation instead of publishing misdecoded values. CI is configured for Humble/Jazzy/Kilted/Lyrical; this workspace's actual local results are from Lyrical. No hardware configuration, external deployment, or firmware update is performed by this release.
+
+The [EVK device-input review](evk_device_inputs.md) explains the later outbound hardening. Its traffic and command limits are driver policy, not manufacturer-certified firmware limits.

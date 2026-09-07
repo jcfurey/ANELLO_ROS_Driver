@@ -80,6 +80,7 @@ void anello_data_port::init()
 
 void anello_data_port::init_uart()
 {
+    next_open_=std::chrono::steady_clock::now()+std::chrono::milliseconds(500);
     if (this->auto_detect)
     {
         this->enumerate_ports();
@@ -139,6 +140,8 @@ void anello_data_port::port_parse_fail_uart()
         this->reopen_warned = false;
         this->fail_count = 0;
         this->uart_port.close_port();
+        confirmed_generation_=0;
+        next_open_=std::chrono::steady_clock::now()+std::chrono::milliseconds(500);
         return;
     }
 
@@ -150,6 +153,9 @@ void anello_data_port::port_parse_fail_uart()
                                              : MAX_CONFIRMED_PORT_FAIL;
     if (fail_limit < this->fail_count)
     {
+        const auto now=std::chrono::steady_clock::now();
+        if (now<next_open_) return;
+        next_open_=now+std::chrono::milliseconds(500);
         this->fail_count = 0;
         this->uart_port.close_port();
 
@@ -203,6 +209,7 @@ void anello_data_port::port_confirm()
 
 void anello_data_port::port_confirm_uart()
 {
+    confirmed_generation_=uart_port.generation();
     last_ok_=std::chrono::steady_clock::now();
     this->fail_count = 0;
     if (this->decode_success) return;
@@ -276,7 +283,8 @@ bool anello_data_port::write_data(const char *buf, size_t buf_len)
 
 bool anello_data_port::write_data_uart(const char *buf, size_t buf_len)
 {
-    return this->uart_port.write_data(buf, buf_len);
+    const auto generation=confirmed_generation_.load();
+    return generation!=0 && this->uart_port.write_data(buf,buf_len,generation);
 }
 
 bool anello_data_port::write_data_ethernet(const char *buf, size_t buf_len)

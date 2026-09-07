@@ -8,6 +8,8 @@ Record the device model/serial, firmware version, parameter file, output rates/f
 
 - [ ] Check `imu/data_raw`, `anello/imu_raw` or `anello/im1`, and the streams named in `expected_streams`. Rates must match configured device output, with no sustained framing-error growth in `/diagnostics`.
 - [ ] Verify `anello/send_cmd` with `{command: 'APPNG'}` and record the checksum-valid reply. For Ethernet, check configured host/device ports; for UART, use stable symlinks where available.
+- [ ] Verify `command_mode=read_only` rejects configuration/reset requests without emitting them. If intentionally resetting with `unrestricted`, expect `SENT` and a brief output interruption; the driver does not await an acknowledgement or retry the reset.
+- [ ] Verify serial data/config identities for this EVK and run only one owning application. Repeated open/close and inherited modem-control changes must not reset this particular hardware/adapter combination.
 - [ ] Power-cycle and replace the device while the node remains running. Both data and config service/APODO transmission must recover. Verify cached IMU/covariance is unavailable during loss, and no position-bearing output is published without a valid INS solution.
 - [ ] With config `OFF`, confirm it remains disabled and commands report unavailable rather than succeeding silently.
 - [ ] Test **six static orientations**, placing each positive and negative body axis upward. Converted specific-force acceleration should be approximately +g on the upward axis, with the other components near zero. Record whether `flip_accel_sign` is required. One level pose cannot establish all three signs or arbitrary mounting alignment.
@@ -32,6 +34,7 @@ Record the device model/serial, firmware version, parameter file, output rates/f
 - [ ] Check geographic east/north headings and turns against an independent reference. APINS attitude and relative APAHRS yaw have different heading contracts.
 - [ ] If using dual antennas, survey baseline length and set `heading_baseline`. Verify APHDG flags, heading, and reference point.
 - [ ] Exercise NTRIP with the real caster: startup outage, no first correction, link loss, server recovery, TLS verification, and VRS GGA requirements. Check NTRIP diagnostics and driver transmission counters as well as receipt on the ROS RTCM topic.
+- [ ] Measure normal correction byte/frame rates and odometer rate; check `device_input_rate_drops_total` and `device_input_rejections_total`. The configurable admission limits are driver policy, not measured firmware capacity. Evaluate long runs with valid inputs before accepting device stability.
 - [ ] Confirm GGA time, ellipsoid/MSL height relationship, and caster acceptance of unavailable HDOP. APGPS supplies PDOP, which the driver does not relabel as HDOP. Review `gps_utc_leap_seconds` against current IERS announcements.
 - [ ] Compare local Cartesian position against surveyed points, including altitude and a route long enough to expose tangent-plane curvature. Record the first-fix origin and its relationship to the robot map.
 - [ ] Deliberately lose position validity after acquiring a fix. INS attitude may remain available; `ins/odometry` and driver TF must stop until position is valid again.

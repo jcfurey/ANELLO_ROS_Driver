@@ -5,6 +5,7 @@
 #include "../src/anello_ros_driver/navigation_math.h"
 #include "../src/anello_ros_driver/sample_state.h"
 #include "../src/anello_ros_driver/clock_translator.h"
+#include "../src/anello_ros_driver/device_input.h"
 using namespace anello;
 namespace {
 std::string ascii(const std::string &body) {
@@ -25,6 +26,61 @@ template<typename T> std::string binary(int subtype, const T &payload, int extra
     return bytes;
 }
 const std::string imu="APIMU,1000,0,0,0,-1,1,2,3,4,0,999,20";
+std::string correction(size_t payload=19, uint16_t type=1005) {
+    std::string frame(payload+6,'\0');
+    auto *p=reinterpret_cast<unsigned char *>(frame.data());
+    p[0]=0xd3; setbitu(p,14,10,payload); setbitu(p,24,12,type);
+    setbitu(p,(frame.size()-3)*8,24,crc24q(p,frame.size()-3));
+    return frame;
+}
+}
+
+TEST(DeviceInput, RtcmValidatesWholeBundlesBeforeAnyTransmission) {
+    const auto valid=[](const std::string &s) {
+        return valid_rtcm_input(reinterpret_cast<const uint8_t *>(s.data()),s.size());
+    };
+    const auto frame=correction();
+    EXPECT_TRUE(valid(frame)); EXPECT_TRUE(valid(frame+correction(21,1006)));
+    size_t count=0;
+    const auto bundle=frame+frame;
+    ASSERT_TRUE(valid_rtcm_input(reinterpret_cast<const uint8_t *>(bundle.data()),bundle.size(),&count));
+    EXPECT_EQ(count,2u);
+    for (size_t length=0;length<frame.size();++length) EXPECT_FALSE(valid(frame.substr(0,length)));
+    auto corrupt=frame; corrupt.back()^=1;
+    EXPECT_FALSE(valid(frame+corrupt)); EXPECT_FALSE(valid(frame+"#APRST,0*58\r\n"));
+    corrupt=frame; corrupt[1]|=0xfc; EXPECT_FALSE(valid(corrupt));
+    EXPECT_FALSE(valid(correction(1))); EXPECT_FALSE(valid(correction(19,4058)));
+    EXPECT_FALSE(valid(correction(19,0))); EXPECT_FALSE(valid(std::string(4097,'x')));
+    EXPECT_FALSE(valid_rtcm_input(nullptr,8));
+}
+TEST(DeviceInput, QueriesCannotSmuggleConfigurationOrResetCommands) {
+    for (const auto body:{"APPNG","APVER","APVEH,R,bsl","APCFG,r,odr,mfm","APECH,hello"})
+        EXPECT_TRUE(read_only_command(body))<<body;
+    for (const auto body:{"AP","APVER,0","APCFG,W,odr,100","APVEH,w,bsl,1","APRST,0", "APUNKNOWN",
+                         "APCFG,R,","APCFG,R,bsl,","APCFG,R,,bsl","APCFG,R,bsl;APRST", "APPNG\r\nAPRST,0"})
+        EXPECT_FALSE(read_only_command(body))<<body;
+    EXPECT_FALSE(valid_command_body(std::string("APECH,")+std::string(123,'x')));
+    EXPECT_FALSE(valid_command_body(std::string("APECH,\0x",8)));
+}
+TEST(DeviceInput, TrafficBudgetBoundsBurstsWithoutQueuing) {
+    TrafficBudget bytes(100,50);
+    auto now=TrafficBudget::Clock::time_point{};
+    EXPECT_TRUE(bytes.take(50,now)); EXPECT_FALSE(bytes.take(1,now));
+    EXPECT_FALSE(bytes.take(51,now+std::chrono::seconds(1)));
+    EXPECT_TRUE(bytes.take(50,now+std::chrono::seconds(1)));
+    EXPECT_FALSE(bytes.take(1,now+std::chrono::seconds(1)));
+    TrafficBudget commands(2,1);
+    EXPECT_TRUE(commands.take(1,now));
+    EXPECT_FALSE(commands.take(1,now+std::chrono::milliseconds(499)));
+    EXPECT_TRUE(commands.take(1,now+std::chrono::milliseconds(501)));
+}
+TEST(DeviceInput, ArbitraryInputLengthsAreBounded) {
+    std::mt19937 random(0xdec0de);
+    std::vector<uint8_t> bytes;
+    for (size_t length=0;length<=4097;++length) {
+        bytes.push_back(static_cast<uint8_t>(random()));
+        (void)valid_rtcm_input(bytes.data(),length);
+    }
 }
 TEST(FullProtocol, ValidModernLegacyAndFragmented) {
     StreamDecoder parser;

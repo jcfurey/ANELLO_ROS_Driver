@@ -13,6 +13,7 @@ import time
 import uuid
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
+from anello_interfaces.msg import APODO
 from anello_interfaces.srv import CmdAndRsp
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from nav_msgs.msg import Odometry
@@ -23,6 +24,7 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import qos_profile_sensor_data
 from rosgraph_msgs.msg import Clock
+from rtcm_msgs.msg import Message as RTCMMessage
 from sensor_msgs.msg import Imu, NavSatFix
 from tf2_msgs.msg import TFMessage
 import yaml
@@ -280,14 +282,16 @@ def test_installed_launch_preserves_types_and_parameter_file(driver_factory, lau
         launch=launch, overrides={'flip_accel_sign': True, 'use_fog_wz': False},
         arguments=['uart_config_port:=OFF', 'ntrip_host:=127.0.0.1', 'ntrip_port:=1',
                    'ntrip_username:=123456', 'ntrip_password:=000012',
-                   'timestamp_source:=arrival', 'covariance_angular_velocity:=[0.1,0.2,0.3]'])
+                   'timestamp_source:=arrival', 'covariance_angular_velocity:=[0.1,0.2,0.3]',
+                   'command_mode:=read_only', 'odometer_max_speed_mps:=75.0'])
     values = driver.parameters('/anello_ros_driver', [
         'uart_config_port', 'flip_accel_sign', 'use_fog_wz', 'timestamp_source',
-        'covariance.angular_velocity'])
+        'covariance.angular_velocity', 'command_mode', 'odometer.max_speed_mps'])
     assert values[0].string_value == 'OFF'
     assert values[1].bool_value and not values[2].bool_value
     assert values[3].string_value == 'arrival'
     assert list(values[4].double_array_value) == [0.1, 0.2, 0.3]
+    assert values[5].string_value == 'read_only' and values[6].double_value == 75.0
     values = driver.parameters('/ntrip_client', ['username', 'password'])
     assert values[0].string_value == '123456'
     assert values[1].string_value == '000012'
@@ -382,3 +386,171 @@ def test_command_reply_validation_preserves_receive_progress(driver_factory):
 def test_invalid_configuration_fails_cleanly(driver_factory, name, value):
     with pytest.raises(AssertionError, match=name):
         driver_factory(overrides={name: value})
+
+
+@pytest.fixture
+def uart_factory(driver_factory):
+    handles = []
+
+    def start(**overrides):
+        data_master, data_slave = pty.openpty()
+        config_master, config_slave = pty.openpty()
+        handles.extend([data_master, data_slave, config_master, config_slave])
+        params = {'com_type': 'UART', 'uart_data_port': os.ttyname(data_slave),
+                  'uart_config_port': os.ttyname(config_slave)}
+        params.update(overrides)
+        return driver_factory(overrides=params), data_master, config_master
+
+    yield start
+    for fd in handles:
+        os.close(fd)
+
+
+def correction(payload_size=19, message_type=1005):
+    """Create a CRC-valid envelope; the default is a zero-position 1005 frame."""
+    payload = (message_type << 4).to_bytes(2, 'big') + bytes(payload_size - 2)
+    packet = b'\xd3' + len(payload).to_bytes(2, 'big') + payload
+    crc = 0
+    for byte in packet:
+        crc ^= byte << 16
+        for _ in range(8):
+            crc = ((crc << 1) ^ (0x1864cfb if crc & 0x800000 else 0)) & 0xffffff
+    return packet + crc.to_bytes(3, 'big')
+
+
+def input_publisher(driver, kind, topic):
+    publisher = driver.node.create_publisher(kind, topic, 10)
+    deadline = time.monotonic() + 3
+    while not publisher.get_subscription_count() and time.monotonic() < deadline:
+        driver.spin(0.02)
+    assert publisher.get_subscription_count()
+    return publisher
+
+
+def test_device_input_rtcm_rejects_arbitrary_or_incomplete_bytes(uart_factory):
+    driver, data, _ = uart_factory()
+    os.write(data, frame(imu(1000)))
+    driver.spin(0.1)
+    pub = input_publisher(driver, RTCMMessage, 'ntrip_client/rtcm')
+    valid = correction()
+    for bad in (frame('APRST,0'), valid[:-1], valid[:-1] + bytes([valid[-1] ^ 1]),
+                valid + b'garbage', valid[:1] + b'\xfc' + valid[2:]):
+        pub.publish(RTCMMessage(message=list(bad)))
+        driver.spin(0.06)
+        assert not select.select([data], [], [], 0)[0], 'Invalid correction reached device'
+    pub.publish(RTCMMessage(message=list(valid)))
+    driver.spin(0.08)
+    assert select.select([data], [], [], 0)[0]
+    assert os.read(data, 4096) == valid
+
+
+def test_device_input_rtcm_waits_for_confirmed_data_port(uart_factory):
+    driver, data, _ = uart_factory()
+    pub = input_publisher(driver, RTCMMessage, 'ntrip_client/rtcm')
+    pub.publish(RTCMMessage(message=list(correction())))
+    driver.spin(0.1)
+    assert not select.select([data], [], [], 0)[0], 'Correction sent to unconfirmed UART'
+
+
+def test_device_input_odometer_rejects_huge_finite_values(uart_factory):
+    driver, _, config = uart_factory()
+    pub = input_publisher(driver, APODO, 'anello/odo')
+    pub.publish(APODO(odo_speed=1e308))
+    driver.spin(0.1)
+    assert not select.select([config], [], [], 0)[0], 'Oversized odometer value reached device'
+    pub.publish(APODO(odo_speed=-2.5))
+    driver.spin(0.1)
+    assert select.select([config], [], [], 0)[0]
+    assert os.read(config, 512) == frame('APODO,-2.50')
+
+
+def test_device_input_commands_default_to_read_only(uart_factory):
+    driver, _, config = uart_factory()
+    client = driver.node.create_client(CmdAndRsp, 'anello/send_cmd')
+    assert client.wait_for_service(timeout_sec=3)
+    for command in ('APRST,0', 'APCFG,W,odr,100', 'APVEH,w,bsl,1.0', 'APUNKNOWN'):
+        future = client.call_async(CmdAndRsp.Request(command=command))
+        driver.executor.spin_until_future_complete(future, timeout_sec=1)
+        assert future.done() and 'read_only' in future.result().response
+        assert not select.select([config], [], [], 0)[0], 'State-changing command reached device'
+
+
+def test_device_input_reset_opt_in_does_not_wait_for_ack_or_retry(uart_factory):
+    driver, _, config = uart_factory(command_mode='unrestricted')
+    client = driver.node.create_client(CmdAndRsp, 'anello/send_cmd')
+    assert client.wait_for_service(timeout_sec=3)
+    start = time.monotonic()
+    future = client.call_async(CmdAndRsp.Request(command='APRST,0'))
+    driver.executor.spin_until_future_complete(future, timeout_sec=0.4)
+    assert future.done() and future.result().response.startswith('SENT:')
+    assert time.monotonic() - start < 0.4
+    assert select.select([config], [], [], 0)[0]
+    assert os.read(config, 512) == frame('APRST,0')
+    second = client.call_async(CmdAndRsp.Request(command='APRST,0'))
+    driver.executor.spin_until_future_complete(second, timeout_sec=0.4)
+    assert second.done() and 'rate limit' in second.result().response
+    driver.spin(0.6)
+    assert not select.select([config], [], [], 0)[0], 'Driver retried reset or bypassed rate limit'
+
+
+def test_device_input_odometer_rate_is_bounded(uart_factory):
+    driver, _, config = uart_factory(**{'odometer.max_rate_hz': 5.0})
+    pub = input_publisher(driver, APODO, 'anello/odo')
+    count = 0
+    start = time.monotonic()
+    while time.monotonic() - start < 0.6:
+        pub.publish(APODO(odo_speed=3.25))
+        driver.spin(0.005)
+        if select.select([config], [], [], 0)[0]:
+            count += os.read(config, 4096).count(b'#APODO,')
+    driver.spin(0.1)
+    if select.select([config], [], [], 0)[0]:
+        count += os.read(config, 4096).count(b'#APODO,')
+    assert 1 <= count <= 1 + math.ceil((time.monotonic() - start) * 5)
+
+
+def test_device_input_rtcm_rate_is_bounded(uart_factory):
+    driver, data, _ = uart_factory(**{'rtcm.max_bytes_per_second': 100.0})
+    os.write(data, frame(imu(1000)))
+    driver.spin(0.1)
+    pub = input_publisher(driver, RTCMMessage, 'ntrip_client/rtcm')
+    bundle = correction(994, 1077) * 4  # Envelope-only fixtures: 4000 bytes, four frames.
+    received = bytearray()
+    start = time.monotonic()
+    for _ in range(5):
+        pub.publish(RTCMMessage(message=list(bundle)))
+        driver.spin(0.04)
+        while select.select([data], [], [], 0)[0]:
+            received.extend(os.read(data, 8192))
+    assert bytes(received) == bundle
+    assert len(received) <= 4096 + 100 * (time.monotonic() - start)
+
+
+def test_device_input_rtcm_small_frame_flood_is_bounded(uart_factory):
+    driver, data, _ = uart_factory(**{'rtcm.max_frames_per_second': 1.0})
+    os.write(data, frame(imu(1000)))
+    driver.spin(0.1)
+    pub = input_publisher(driver, RTCMMessage, 'ntrip_client/rtcm')
+    pub.publish(RTCMMessage(message=list(correction() * 17)))
+    driver.spin(0.06)
+    assert not select.select([data], [], [], 0)[0]
+    pub.publish(RTCMMessage(message=list(correction() * 16)))
+    driver.spin(0.08)
+    assert os.read(data, 4096) == correction() * 16
+    pub.publish(RTCMMessage(message=list(correction())))
+    driver.spin(0.06)
+    assert not select.select([data], [], [], 0)[0]
+
+
+def test_device_input_rejects_same_serial_device_through_alias(driver_factory, tmp_path):
+    master, slave = pty.openpty()
+    try:
+        alias = tmp_path / 'same-device'
+        alias.symlink_to(os.ttyname(slave))
+        with pytest.raises(AssertionError, match='distinct serial devices'):
+            driver_factory(overrides={'com_type': 'UART', 'uart_data_port': os.ttyname(slave),
+                                      'uart_config_port': str(alias)})
+        assert not select.select([master], [], [], 0)[0]
+    finally:
+        os.close(master)
+        os.close(slave)

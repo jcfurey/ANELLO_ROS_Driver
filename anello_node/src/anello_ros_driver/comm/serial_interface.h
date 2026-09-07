@@ -18,6 +18,7 @@ public:
     size_t get_data(char *buf, size_t size) override { return get_data(buf,size,0); }
     size_t get_data(char *buf, size_t size, int timeout_ms);
     bool write_data(const char *buf, size_t size) override;
+    bool write_data(const char *buf, size_t size, uint64_t expected_generation);
     std::string get_portname() const;
     bool get_port_enabled() const;
     uint64_t generation() const { return generation_; }
@@ -26,6 +27,7 @@ private:
     int duplicate_fd() const;
     void close_generation(uint64_t generation);
     mutable std::mutex mutex_;
+    std::timed_mutex write_mutex_;
     int usb_fd=-1;
     std::string portname;
     std::atomic<uint64_t> generation_{0};

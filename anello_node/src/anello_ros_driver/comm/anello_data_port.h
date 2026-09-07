@@ -16,6 +16,7 @@
 #define ANELLO_DATA_PORT_H
 
 #include <chrono>
+#include <atomic>
 #include "serial_interface.h"
 #include "ethernet_interface.h"
 
@@ -24,6 +25,8 @@ class anello_data_port
 private:
     std::chrono::steady_clock::time_point last_ok_=std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_retry_{};
+    std::chrono::steady_clock::time_point next_open_{};
+    std::atomic<uint64_t> confirmed_generation_{0};
     bool decode_success = false;
     bool auto_detect = false;
     bool had_loss = false;      // a confirmed stream was lost (log recovery)
@@ -72,9 +75,8 @@ public:
      */
     void init();
     size_t get_data(char *buf, size_t buf_len);
-    /* timeout_ms applies to UART reads only (select() bound); ethernet
-     * reads are always non-blocking. A 0 ms UART poll that returns empty
-     * does not count toward port rotation. */
+    /* timeout_ms bounds UART poll(); ethernet reads are non-blocking.
+     * Empty drain polls advance recovery only after sustained silence. */
     size_t get_data(char *buf, size_t buf_len, int timeout_ms);
     bool write_data(const char *buf, size_t buf_len);
 
@@ -93,4 +95,4 @@ public:
 
 };     
 
-#endif // ANELLO_CONFIG_PORT_H
+#endif // ANELLO_DATA_PORT_H
