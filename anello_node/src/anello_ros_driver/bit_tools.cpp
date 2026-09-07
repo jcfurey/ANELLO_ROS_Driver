@@ -108,19 +108,32 @@ extern int getbits(const unsigned char *buff, int pos, int len)
  * zero : The checksum is not correct and the message is invalid
  *
  */
-extern int checksum(unsigned char *buff, int len)
+extern int checksum(const unsigned char *buff, int len)
 {
+    if (buff == nullptr || len < 5) return 0;
+    // Accept complete serial replies and decoder input with LF or CRLF
+    // already stripped. A lone LF or bytes after the checksum are invalid.
+    if (buff[len - 1] == '\n') {
+        if (buff[len - 2] != '\r') return 0;
+        len -= 2;
+    } else if (buff[len - 1] == '\r') {
+        --len;
+    }
+    if (len < 5 || buff[0] != '#' || buff[len - 3] != '*') return 0;
+    const auto hex = [](unsigned char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    const int hi = hex(buff[len - 2]), lo = hex(buff[len - 1]);
+    if (hi < 0 || lo < 0) return 0;
     unsigned char ck_sum = 0;
-    int i;
-    char hex[3];
-
-    for (i = 1; i < len - 4; i++)
-    {
+    for (int i = 1; i < len - 3; ++i) {
+        if (buff[i] < 0x20 || buff[i] > 0x7e || buff[i] == '#' || buff[i] == '*') return 0;
         ck_sum ^= buff[i];
     }
-    snprintf(hex, sizeof(hex), "%02X", ck_sum);
-
-    return (hex[0] == buff[len - 3]) && (hex[1] == buff[len - 2]);
+    return ck_sum == hi * 16 + lo;
 }
 
 extern std::string compute_checksum(const char *buff, int len)

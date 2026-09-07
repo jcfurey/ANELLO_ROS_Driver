@@ -9,7 +9,7 @@
  ********************************************************************************/
 
 #include "message_publisher.h"
-#include "../main_anello_ros_driver.h"
+
 #include "health_message.h"
 #include "../bit_tools.h"
 
@@ -32,7 +32,7 @@
 #include <nmea_msgs/msg/sentence.hpp>
 #include <std_msgs/msg/header.hpp>
 
-void publish_gga(double *gps, const gga_pub_t &pub, rclcpp::Time time, const std::string &frame_id)
+void publish_gga(double *gps, const gga_pub_t &pub, rclcpp::Time time, const std::string &frame_id, int leap_seconds)
 {
     std_msgs::msg::Header msg_header;
     nmea_msgs::msg::Sentence gga_message;
@@ -44,11 +44,13 @@ void publish_gga(double *gps, const gga_pub_t &pub, rclcpp::Time time, const std
     gngga_message << "$GNGGA,";
 
     double gps_seconds = gps[1] * 1e-9;
-    // GPS-UTC offset: 18 leap seconds as of 2017
-    time_t utc_time_s = static_cast<time_t>(gps_seconds - 18.0);
+    if (gps_seconds<leap_seconds) return;
+    // GGA only needs UTC time-of-day; GPS and Unix epochs are both midnight.
+    time_t utc_time_s = static_cast<time_t>(gps_seconds - leap_seconds);
     struct tm utc_info_buf;
     struct tm *utc_info = gmtime_r(&utc_time_s, &utc_info_buf);
 
+    if (!utc_info) return;
     int utc_hours = utc_info->tm_hour;
     int utc_minutes = utc_info->tm_min;
     int utc_seconds_int = utc_info->tm_sec;
@@ -104,9 +106,14 @@ void publish_gga(double *gps, const gga_pub_t &pub, rclcpp::Time time, const std
     // Fixed precision keeps the sentence under the 82-char NMEA limit
     // that the NTRIP client's parser enforces.
     gngga_message << static_cast<int>(gps[12]) << ",";
-    gngga_message << std::fixed << std::setprecision(2) << gps[10] << ",";
-    gngga_message << std::setprecision(1) << gps[5] << ",M,";
-    gngga_message << ",M,";
+    // APGPS provides PDOP, not the HDOP requested by this GGA field.
+    gngga_message << ",";
+    if (fix_type==3) {
+        gngga_message << std::fixed << std::setprecision(1) << gps[5] << ",M,";
+        gngga_message << gps[4]-gps[5] << ",M,";
+    } else {
+        gngga_message << ",M,,M,";
+    }
     gngga_message << ",";
     gngga_message << "";
 
@@ -116,6 +123,7 @@ void publish_gga(double *gps, const gga_pub_t &pub, rclcpp::Time time, const std
     std::string ck = compute_checksum(sentence.c_str() + 1, sentence.length() - 1);
     sentence += "*" + ck + "\r\n";
 
+    if (sentence.size()>82) return;
     gga_message.header = msg_header;
     gga_message.sentence = std::move(sentence);
 
@@ -151,29 +159,7 @@ void publish_gps(double *gps, const gps_pub_t &pub, rclcpp::Time stamp, const st
 
 void publish_gp2(double *gp2, const gps_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)
 {
-    anello_interfaces::msg::APGPS msg;
-
-    msg.header.stamp = stamp;
-    msg.header.frame_id = frame_id;
-
-    msg.mcu_time = gp2[0];
-    msg.gps_time = gp2[1];
-    msg.lat = gp2[2];
-    msg.lon = gp2[3];
-    msg.alt_ellipsoid = gp2[4];
-    msg.alt_msl = gp2[5];
-    msg.speed = gp2[6];
-    msg.heading = gp2[7];
-    msg.hacc = gp2[8];
-    msg.vacc = gp2[9];
-    msg.pdop = gp2[10];
-    msg.fix_type = static_cast<uint8_t>(gp2[11]);
-    msg.sat_num = static_cast<uint8_t>(gp2[12]);
-    msg.speed_accuracy = gp2[13];
-    msg.heading_accuracy = gp2[14];
-    msg.rtk_fix_status = static_cast<uint8_t>(gp2[15]);
-
-    pub->publish(msg);
+    publish_gps(gp2,pub,stamp,frame_id);
 }
 
 void publish_hdr(double *hdr, const hdg_pub_t &pub, rclcpp::Time stamp, const std::string &frame_id)

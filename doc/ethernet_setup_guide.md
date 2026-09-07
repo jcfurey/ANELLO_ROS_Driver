@@ -234,13 +234,15 @@ With the driver up, integration is identical to serial operation — see
 the [integration guide](integration_guide.md) for the full treatment.
 The short version:
 
-1. **TF/URDF:** add the unit to your URDF at its mounted pose; the
-   driver broadcasts `odom -> base_link` (`tf_parent_frame` ->
-   `tf_child_frame`) only if `publish_tf:=true` (disable it when
-   `robot_localization` owns `odom -> base_link`).
-2. **Pick one fusion topology** (integration guide §5): trust the INS
-   (`ins/fix` + driver TF, no second EKF), or re-fuse `imu/data` +
-   `gps/fix` through `ekf_node` + `navsat_transform_node` — never both.
+1. **TF/URDF:** add the unit to your URDF at its measured mounting pose.
+   Driver TF defaults to disabled; the robot estimator owns
+   `map -> odom -> base_link`. Optional standalone TF is
+   `anello_local -> ins_link`, and its child must have no other parent.
+2. **Choose the measurement sources:** use `ins/odometry` as a globally
+   corrected measurement with verified covariance and datum alignment,
+   or fuse `imu/data_raw` and `gps/fix` with the heading reference required
+   by your estimator. Follow the integration guide's correlation and
+   heading guidance; INS output and its raw inputs are not independent.
 3. **Odometer input:** publish signed speed (m/s, negative in reverse)
    on `anello/odo`; in ETH mode the driver routes it to the unit's
    UDP-only odometer channel. Strongly recommended for GNSS-denied

@@ -13,6 +13,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/APIMU.msg"
   "msg/APIM1.msg"
   "msg/APINS.msg"
+  "msg/APAHRS.msg"
   "msg/APGPS.msg"
   "msg/APHDG.msg"
   "msg/APODO.msg"

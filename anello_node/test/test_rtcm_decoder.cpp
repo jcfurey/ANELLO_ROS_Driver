@@ -5,7 +5,7 @@
 
 #include <cstring>
 
-#include "../src/anello_ros_driver/main_anello_ros_driver.h"
+#include "../src/anello_ros_driver/protocol_types.h"
 #include "../src/anello_ros_driver/messaging/rtcm_decoder.h"
 
 namespace

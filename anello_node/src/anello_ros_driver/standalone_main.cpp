@@ -14,11 +14,17 @@
 
 int main(int argc, char **argv)
 {
-    rclcpp::init(argc, argv);
-    rclcpp::executors::MultiThreadedExecutor executor;
-    auto node = anello::make_anello_driver(rclcpp::NodeOptions());
-    executor.add_node(node);
-    executor.spin();
-    rclcpp::shutdown();
-    return 0;
+    try {
+        rclcpp::init(argc, argv);
+        rclcpp::executors::MultiThreadedExecutor executor;
+        auto node = anello::make_anello_driver(rclcpp::NodeOptions());
+        executor.add_node(node);
+        executor.spin();
+        rclcpp::shutdown();
+        return 0;
+    } catch (const std::exception &error) {
+        RCLCPP_ERROR(rclcpp::get_logger("anello_ros_driver"), "%s",error.what());
+        if (rclcpp::ok()) rclcpp::shutdown();
+        return 1;
+    }
 }

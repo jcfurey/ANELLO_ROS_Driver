@@ -93,6 +93,10 @@ class RTCMParser:
             message_length = (
                 (data[index + 1] << 8 | data[index + 2]) & 0x03FF
             )
+            if message_length < 2:
+                index += 1
+                consumed = index
+                continue
             frame_length = message_length + 6  # 3 header + payload + 3 CRC
 
             # Wait for the full frame (preamble..CRC) to arrive

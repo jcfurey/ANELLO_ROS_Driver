@@ -7,6 +7,8 @@
 
 #ifndef CLOCK_TRANSLATOR_H
 #define CLOCK_TRANSLATOR_H
+#include <cstdint>
+#include <cmath>
 
 namespace anello
 {
@@ -21,6 +23,15 @@ namespace anello
 class ClockTranslator
 {
 public:
+    void update_ns(double device_s, int64_t arrival_ns)
+    {
+        if (have_last_ && device_s+kResetThreshold<last_device_s_) reset();
+        if (!epoch_valid_) { epoch_ns_=arrival_ns; epoch_valid_=true; }
+        update(device_s, static_cast<double>(arrival_ns-epoch_ns_)*1e-9);
+    }
+    int64_t translate_ns(double device_s) const {
+        return epoch_ns_+static_cast<int64_t>(std::llround(translate(device_s)*1e9));
+    }
     void update(double device_s, double arrival_s)
     {
         if (have_last_ && device_s + kResetThreshold < last_device_s_)
@@ -59,6 +70,7 @@ public:
     double translate(double device_s) const { return device_s + min_offset_; }
     void reset()
     {
+        epoch_valid_ = false;
         n_samples_ = 0;
         have_last_ = false;
         min_offset_ = 0.0;
@@ -71,6 +83,8 @@ public:
     static constexpr double kResetThreshold = 1.0;
 
 private:
+    int64_t epoch_ns_ = 0;
+    bool epoch_valid_ = false;
     double min_offset_ = 0.0;
     double last_device_s_ = 0.0;
     bool have_last_ = false;

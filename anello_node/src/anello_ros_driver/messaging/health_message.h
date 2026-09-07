@@ -26,23 +26,27 @@ enum POSITION_STATUS_FLAGS
 {
     CM_LEVEL_ACCURACY,
     SUB_METER_LEVEL_ACCURACY,
-    GPS_ACC_POOR
+    GPS_ACC_POOR,
+    POSITION_UNAVAILABLE
 };
 
 enum HEADING_STATUS_FLAGS
 {
     HEADING_STABLE,
-    HEADING_UNSTABLE
+    HEADING_UNSTABLE,
+    HEADING_UNAVAILABLE
 };
 
 enum GYRO_STATUS_FLAGS
 {
     GYRO_GOOD,
-    GYRO_BAD
+    GYRO_BAD,
+    GYRO_UNAVAILABLE
 };
 
 class health_message {
 private:
+    bool fog_enabled_=true, gps_valid_=false, heading_available_=false;
     // imu message information
     double cur_imu_time;
     bool buffer_full;
@@ -58,9 +62,7 @@ private:
 
     int circular_buffer_index;
 
-    // FOG samples are buffered separately so exact-zero samples
-    // (transient dropout or FOG disabled) can be skipped without
-    // stalling the MEMS window.
+    // Separate window allows explicit FOG disabling.
     bool fog_buffer_full;
     int fog_circular_buffer_index;
 
@@ -104,6 +106,7 @@ public:
     void add_gps_message(double *data);
     void add_hdg_message(double *data);
     void set_baseline(double baseline);
+    void set_fog_enabled(bool enabled) { fog_enabled_=enabled; }
 
     uint8_t get_position_status() const;
     uint8_t get_heading_status() const;

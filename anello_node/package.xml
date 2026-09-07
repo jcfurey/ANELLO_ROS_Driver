@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>anello_ros_driver</name>
-  <version>3.1.0</version>
+  <version>4.0.0</version>
   <description>ROS2 driver for ANELLO Photonics GNSS/INS devices</description>
   <maintainer email="austin.johnson@anellophotonics.com">Austin Johnson</maintainer>
   <license>MIT</license>
@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>rcl_interfaces</depend>
   <depend>rclcpp_components</depend>
   <depend>anello_interfaces</depend>
   <depend>std_msgs</depend>
@@ -22,6 +23,16 @@
   <depend>tf2_ros</depend>
   <depend>diagnostic_updater</depend>
 
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ntrip_client</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>rosgraph_msgs</test_depend>
+  <test_depend>tf2_msgs</test_depend>
+  <test_depend>diagnostic_msgs</test_depend>
+  <test_depend>ament_index_python</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

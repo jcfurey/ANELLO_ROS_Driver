@@ -1,3 +1,4 @@
+# Deprecated compatibility definition: no service is advertised. Use CmdAndRsp.
 float32 init_heading
 ---
 bool is_success

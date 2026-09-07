@@ -10,6 +10,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(anello_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -29,7 +30,7 @@ set(DRIVER_SOURCES
   src/anello_ros_driver/comm/ethernet_interface.cpp
   src/anello_ros_driver/comm/anello_config_port.cpp
   src/anello_ros_driver/comm/anello_data_port.cpp
-  src/anello_ros_driver/messaging/ascii_decoder.cpp
+  src/anello_ros_driver/messaging/protocol_decoder.cpp
   src/anello_ros_driver/messaging/health_message.cpp
   src/anello_ros_driver/messaging/message_publisher.cpp
   src/anello_ros_driver/messaging/rtcm_decoder.cpp
@@ -41,6 +42,7 @@ target_link_libraries(anello_ros_driver_component PUBLIC
   rclcpp::rclcpp
   rclcpp_components::component
   ${anello_interfaces_TARGETS}
+  ${rcl_interfaces_TARGETS}
   ${std_msgs_TARGETS}
   ${sensor_msgs_TARGETS}
   ${geometry_msgs_TARGETS}
@@ -93,8 +95,12 @@ if(BUILD_TESTING)
   set(ament_cmake_uncrustify_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_ros_regressions test/test_ros_regressions.py TIMEOUT 120)
+
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_anello_decoding
+    test/test_protocol_regressions.cpp
     test/test_bit_tools.cpp
     test/test_ascii_decoder.cpp
     test/test_rtcm_decoder.cpp

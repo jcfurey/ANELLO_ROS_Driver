@@ -7,7 +7,7 @@ env:
 
 on:
   push:
-    branches: [main, ros2_develop]
+    branches: [main, ros2_develop, ros2_develop_cam]
   pull_request:
   workflow_dispatch:
 
@@ -18,11 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Rolling is omitted: its rosdistro entries have moved past the
-        # Ubuntu base of the official ros:rolling container, so no
-        # dependency keys (incl. std_msgs) resolve there. Re-add it once
-        # ros:rolling ships on the new base.
-        distro: [jazzy, kilted]
+        # Exercise the maintained stable distributions.
+        distro: [humble, jazzy, kilted, lyrical]
     container:
       image: ros:${{ matrix.distro }}
     steps:
@@ -47,13 +44,16 @@ jobs:
         run: |
           source /opt/ros/${{ matrix.distro }}/setup.bash
           source install/setup.bash
-          colcon test --event-handlers console_cohesion+
+          colcon test --python-testing pytest --return-code-on-test-failure --event-handlers console_cohesion+
           colcon test-result --verbose
+          python3 tools/check_test_results.py build
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: test-results-${{ matrix.distro }}
-          path: build/*/test_results/**/*.xml
-          if-no-files-found: ignore
+          path: |
+            build/*/test_results/**/*.xml
+            build/ntrip_client/pytest.xml
+          if-no-files-found: error

@@ -10,8 +10,8 @@
  * Note:
  ********************************************************************************/
 
-#ifndef __DATA_BUFF_H__
-#define __DATA_BUFF_H__
+#ifndef ANELLO_BIT_TOOLS_H
+#define ANELLO_BIT_TOOLS_H
 
 #ifdef __cplusplus
 extern "C"
@@ -41,7 +41,7 @@ extern "C"
      * zero : The checksum is not correct and the message is invalid
      *
      */
-    int checksum(unsigned char *buff, int len);
+    int checksum(const unsigned char *buff, int len);
 
 
 #ifdef __cplusplus

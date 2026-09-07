@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>anello_interfaces</name>
-  <version>1.0.0</version>
+  <version>4.0.0</version>
   <description>Contains message definitions for anello ros driver</description>
   <maintainer email="austin.johnson@anellophotonics.com">Austin Johnson</maintainer>
   <license>MIT</license>

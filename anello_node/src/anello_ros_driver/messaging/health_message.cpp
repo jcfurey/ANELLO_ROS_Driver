@@ -17,12 +17,7 @@
 #include <cmath>
 #include "health_message.h"
 
-// Gross-fault gate on the MEMS-vs-FOG window-mean difference. The noise
-// floor of the comparison is sigma_d = sqrt(ARW_mems^2 + ARW_fog^2 / N/Fs)
-// ~ 5e-3 deg/s for a 1 s window, so 0.25 deg/s is a ~50-sigma gate: it
-// cannot false-alarm on sensor noise, still covers a 1000 ppm
-// scale-factor mismatch at 100 deg/s, and detects real failures 8x
-// sooner than the previous 2 deg/s gate (which was ~400 sigma).
+// Gross disagreement threshold for the ten-sample MEMS/FOG window.
 #ifndef GYRO_DISCREPANCY_THRESHOLD
 #define GYRO_DISCREPANCY_THRESHOLD 0.25 // deg/s
 #endif
@@ -55,7 +50,7 @@
 // Stuck-channel floors: a healthy channel's per-sample std is
 // ARW * sqrt(Fs); these are 0.2x that at the slowest ODR (20 Hz), the
 // worst case across 20-200 Hz (MEMS ARW 0.3 deg/sqrt-hr, FOG 0.05).
-// P(std < 0.2 sigma | N=100) < 1e-40, so false alarms are negligible.
+// These heuristic thresholds require validation at the actual rate and bandwidth.
 #ifndef STUCK_STD_FLOOR_MEMS
 #define STUCK_STD_FLOOR_MEMS 4.5e-3 // deg/s
 #endif
@@ -138,12 +133,8 @@ void health_message::add_imu_message(double *imu_msg)
         this->buffer_full = true;
     }
 
-    // FOG path: skip exact-zero samples (transient dropout, or FOG
-    // disabled) so a few zeros in the window don't bias the FOG mean
-    // toward zero and trip a spurious discrepancy fault during rotation.
-    // With the FOG disabled the window never fills and the gyro
-    // discrepancy check stays inactive.
-    if (wz_fog != 0.0)
+    // Disabled FOG is explicit; zero samples from an enabled FOG enter the window.
+    if (fog_enabled_)
     {
         this->wz_fog_current_sum += wz_fog;
         this->wz_fog_current_sum -= this->wz_fog_circular_buffer[this->fog_circular_buffer_index];
@@ -187,6 +178,7 @@ void health_message::add_ins_message(double* ins_msg)
 { 
     this->ins_heading = ins_msg[11];
     double ins_status = ins_msg[2];
+    heading_available_=(ins_status==2 || ins_status==3 || ins_status==4 || ins_status==10);
 
     double gps_ins_diff, hdg_ins_diff;
     this->get_current_diff(&gps_ins_diff, &hdg_ins_diff);
@@ -251,6 +243,8 @@ void health_message::add_ins_message(double* ins_msg)
 
 void health_message::add_gps_message(double *gps_msg)
 {
+    gps_valid_=(gps_msg[11]==2 || gps_msg[11]==3);
+    this->gps_read_flag=false;
     this->gps_heading = gps_msg[7];
     if (this->gps_heading > 180)
         this->gps_heading -= 360;
@@ -261,7 +255,7 @@ void health_message::add_gps_message(double *gps_msg)
     // Only schedule the gps-vs-ins heading comparison when moving fast
     // enough for course-over-ground to be meaningful; below
     // GPS_HEADING_MIN_SPEED the streak counter must not accumulate.
-    if (gps_msg[6] >= GPS_HEADING_MIN_SPEED)
+    if (gps_valid_ && gps_msg[6] >= GPS_HEADING_MIN_SPEED)
     {
         this->gps_read_flag = true;
     }
@@ -310,13 +304,8 @@ void health_message::get_current_diff(double *gps_diff_out, double *hdg_diff_out
 
 bool health_message::is_not_rotating() const
 {
-    // Rotation gate for the heading comparisons. Prefer the FOG mean,
-    // but with the FOG disabled its window never fills (exact-zero
-    // samples are skipped) and the average stays at 0.0 — gating on it
-    // would leave heading checks active during turns and trip spurious
-    // HEADING_UNSTABLE faults. Fall back to the MEMS mean, which
-    // always fills.
-    const double wz = this->fog_buffer_full
+    // Use the selected channel for the rotation gate.
+    const double wz = fog_enabled_ && this->fog_buffer_full
         ? this->wz_fog_moving_average
         : (this->buffer_full ? this->wz_mems_moving_average : 0.0);
     return std::fabs(wz) < 5;
@@ -339,16 +328,15 @@ bool health_message::is_single_antenna_heading_valid()
 
 bool health_message::has_rtk_fix() const
 {
-    return (this->rtk_status >= 2);
+    return gps_valid_ && this->rtk_status == 2;
 }
 
 bool health_message::has_gyro_discrepancy() const
 {
     bool ret_val = false;
 
-    // Both windows must be ready: FOG stats accumulate only from nonzero
-    // samples, so with the optical gyro disabled (APCFG fog off) its
-    // window never fills and there is nothing to compare against.
+    // Startup is reported separately as unavailable until the window fills.
+    if (!fog_enabled_) return buffer_full && wz_mems_std_dev<STUCK_STD_FLOOR_MEMS;
     if (this->buffer_full && this->fog_buffer_full)
     {
         // Above the optical gyro's range the channels legitimately diverge
@@ -376,11 +364,12 @@ bool health_message::has_gyro_discrepancy() const
 
 bool health_message::has_good_gps_accuracy() const
 {
-    return (this->gps_hacc < GOOD_GPS_ACC_TRESHOLD);
+    return gps_valid_ && this->gps_hacc > 0 && this->gps_hacc < GOOD_GPS_ACC_TRESHOLD;
 }
 
 uint8_t health_message::get_position_status() const 
 {
+    if (!gps_valid_) return POSITION_UNAVAILABLE;
     uint8_t ret_val = GPS_ACC_POOR;
 
     if (this->has_rtk_fix())
@@ -401,6 +390,7 @@ uint8_t health_message::get_position_status() const
 
 uint8_t health_message::get_heading_status() const 
 {
+    if (!heading_available_) return HEADING_UNAVAILABLE;
     uint8_t ret_val = HEADING_STABLE;
 
     if (HEADING_MISMATCH_COUNT_TH <= this->gps_ins_mismatch_streak)
@@ -418,6 +408,7 @@ uint8_t health_message::get_heading_status() const
 
 uint8_t health_message::get_gyro_status() const 
 {
+    if (!buffer_full || (fog_enabled_ && !fog_buffer_full)) return GYRO_UNAVAILABLE;
     uint8_t ret_val = GYRO_BAD;
 
     if (!this->has_gyro_discrepancy())

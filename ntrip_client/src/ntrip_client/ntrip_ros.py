@@ -2,16 +2,21 @@
 
 import os
 import json
+import math
+import queue
 import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Header
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rtcm_msgs.msg import Message as RTCM
 from nmea_msgs.msg import Sentence
 
 from ntrip_client.ntrip_client import NTRIPClient
+from ntrip_client.worker import NTRIPWorker
+from rcl_interfaces.msg import ParameterDescriptor
 
 
 class NTRIPRos(Node):
@@ -27,7 +32,8 @@ class NTRIPRos(Node):
 
         self.declare_parameters(
             namespace='',
-            parameters=[
+            parameters=[(name, value, ParameterDescriptor(read_only=True))
+                        for name, value in [
                 ('host', '127.0.0.1'),
                 ('port', 2101),
                 ('mountpoint', 'mount'),
@@ -39,7 +45,8 @@ class NTRIPRos(Node):
                 ('cert', 'None'),
                 ('key', 'None'),
                 ('ca_cert', 'None'),
-                ('rtcm_frame_id', 'odom'),
+                ('rtcm_frame_id', 'gnss_link'),
+                ('nmea_max_age_seconds', 30.0),
                 ('reconnect_attempt_max', NTRIPClient.DEFAULT_RECONNECT_ATTEMPT_MAX),
                 ('reconnect_attempt_wait_seconds',
                  NTRIPClient.DEFAULT_RECONNECT_ATTEMPT_WAIT_SECONDS),
@@ -49,7 +56,7 @@ class NTRIPRos(Node):
                 # forwarded stream is rate-limited here. 0 disables the
                 # throttle.
                 ('nmea_min_interval_seconds', 10.0),
-            ]
+            ]]
         )
 
         host = self.get_parameter('host').value
@@ -118,78 +125,67 @@ class NTRIPRos(Node):
 
         self._nmea_min_interval = \
             self.get_parameter('nmea_min_interval_seconds').value
-        self._last_nmea_send = None
-        self._next_connect_attempt = None
+        for name in ('rtcm_timeout_seconds', 'nmea_max_age_seconds'):
+            value = self.get_parameter(name).value
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError('{} must be finite and positive'.format(name))
+        for name in ('reconnect_attempt_wait_seconds', 'nmea_min_interval_seconds'):
+            value = self.get_parameter(name).value
+            if not math.isfinite(value) or value < 0:
+                raise ValueError('{} must be finite and nonnegative'.format(name))
+        if not 1 <= port <= 65535:
+            raise ValueError('NTRIP port out of range')
+        self._worker = NTRIPWorker(
+            self._client, self._nmea_min_interval,
+            self.get_parameter('nmea_max_age_seconds').value)
         self._rtcm_timer = None
+        self._diagnostic_pub = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
+        self._diagnostic_timer = self.create_timer(1.0, self.publish_diagnostics)
 
     def run(self):
-        if not self._client.connect():
-            self.get_logger().error('Unable to connect to NTRIP server')
-            return False
-
         self._nmea_sub = self.create_subscription(
             Sentence, 'ntrip_client/nmea', self.subscribe_nmea, 10)
         self._rtcm_timer = self.create_timer(0.1, self.publish_rtcm)
+        self._worker.start()
         return True
 
     def stop(self):
-        self.get_logger().info('Shutting down NTRIP client')
         if self._rtcm_timer:
             self._rtcm_timer.cancel()
-            self._rtcm_timer.destroy()
-        self._client.disconnect()
+        self._diagnostic_timer.cancel()
+        self._worker.stop()
 
     def subscribe_nmea(self, nmea):
-        now = time.monotonic()
-        if (
-            self._nmea_min_interval > 0
-            and self._last_nmea_send is not None
-            and now - self._last_nmea_send < self._nmea_min_interval
-        ):
-            return
-        self._last_nmea_send = now
-        try:
-            self._client.send_nmea(nmea.sentence)
-        except Exception as e:
-            # send_nmea can raise through reconnect() exhaustion; a
-            # callback exception would kill the node. publish_rtcm's
-            # recovery path re-establishes the connection.
-            self.get_logger().error(
-                'Failed to send NMEA to the NTRIP server: {}'.format(e))
+        self._worker.submit_nmea(nmea.sentence)
 
     def publish_rtcm(self):
-        # A lost caster must not be fatal: when the client is
-        # disconnected (e.g. reconnect() exhausted its attempts and
-        # raised), keep retrying at the reconnect cadence so
-        # corrections resume when the caster comes back.
-        if not self._client.connected:
-            now = time.monotonic()
-            if (
-                self._next_connect_attempt is not None
-                and now < self._next_connect_attempt
-            ):
-                return
-            self._next_connect_attempt = \
-                now + self._client.reconnect_attempt_wait_seconds
-            self.get_logger().info('Attempting to reconnect to the NTRIP server')
-            if not self._client.connect():
-                return
-        try:
-            packets = self._client.recv_rtcm()
-        except Exception as e:
-            self.get_logger().error(
-                'Lost connection to the NTRIP server, will keep '
-                'retrying: {}'.format(e))
-            return
-        for packet in packets:
-            rtcm_msg = RTCM(
-                header=Header(
-                    stamp=self.get_clock().now().to_msg(),
-                    frame_id=self._rtcm_frame_id
-                ),
-                message=packet
-            )
-            self._rtcm_pub.publish(rtcm_msg)
+        for _ in range(32):
+            try:
+                packet = self._worker.next_packet()
+            except queue.Empty:
+                break
+            self._rtcm_pub.publish(RTCM(
+                header=Header(stamp=self.get_clock().now().to_msg(),
+                              frame_id=self._rtcm_frame_id),
+                message=packet))
+
+    def publish_diagnostics(self):
+        connected = self._client.connected
+        age = time.monotonic() - self._client._recv_rtcm_last_packet_timestamp
+        fresh = (connected and self._client._first_rtcm_received
+                 and age < self._client.rtcm_timeout_seconds)
+        status = DiagnosticStatus(
+            name=self.get_fully_qualified_name() + ': caster',
+            hardware_id=self._client._host,
+            level=DiagnosticStatus.OK if fresh else DiagnosticStatus.WARN,
+            message='Receiving corrections' if fresh else 'Waiting for valid corrections',
+            values=[KeyValue(key=key, value=str(value)) for key, value in (
+                ('connected', connected), ('last_valid_correction_age_s', age),
+                ('queue_depth', self._worker.packets.qsize()),
+                ('queue_drops', self._worker.dropped_packets),
+                ('expired_corrections', self._worker.expired_packets))])
+        self._diagnostic_pub.publish(DiagnosticArray(
+            header=Header(stamp=self.get_clock().now().to_msg()), status=[status]))
 
 
 def main():

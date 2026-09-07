@@ -40,7 +40,7 @@ public:
     virtual ~base_interface() = default;
 
     virtual size_t get_data(char *buf, size_t buf_len) { (void)buf; (void)buf_len; return 0; }
-    virtual void write_data(const char *buf, size_t buf_len) { (void)buf; (void)buf_len; }
+    virtual bool write_data(const char *buf, size_t buf_len) = 0;
 };
 
 #endif

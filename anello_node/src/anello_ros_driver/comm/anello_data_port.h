@@ -15,12 +15,15 @@
 #ifndef ANELLO_DATA_PORT_H
 #define ANELLO_DATA_PORT_H
 
+#include <chrono>
 #include "serial_interface.h"
 #include "ethernet_interface.h"
 
 class anello_data_port
 {
 private:
+    std::chrono::steady_clock::time_point last_ok_=std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_retry_{};
     bool decode_success = false;
     bool auto_detect = false;
     bool had_loss = false;      // a confirmed stream was lost (log recovery)
@@ -50,8 +53,8 @@ private:
     size_t get_data_uart(char *buf, size_t buf_len, int timeout_ms);
     size_t get_data_ethernet(char *buf, size_t buf_len);
 
-    void write_data_uart(const char *buf, size_t buf_len);
-    void write_data_ethernet(const char *buf, size_t buf_len);
+    bool write_data_uart(const char *buf, size_t buf_len);
+    bool write_data_ethernet(const char *buf, size_t buf_len);
 public:
     /*
      * Notes:
@@ -73,10 +76,12 @@ public:
      * reads are always non-blocking. A 0 ms UART poll that returns empty
      * does not count toward port rotation. */
     size_t get_data(char *buf, size_t buf_len, int timeout_ms);
-    void write_data(const char *buf, size_t buf_len);
+    bool write_data(const char *buf, size_t buf_len);
 
     void port_parse_fail();
     void port_confirm();
+    uint64_t generation() const { return uart_port.generation(); }
+    uint64_t truncated_datagrams() const { return ethernet_port.truncated_datagrams(); }
 
     const std::string get_portname() const {
         if (this->config.type == ETH) {

@@ -1,85 +1,35 @@
-<!-- Legacy XML launch file. Prefer anello_driver.launch.py for new deployments. -->
+<!-- Compatibility entry point: all implementation and defaults live in Python. -->
 <launch>
-    <!-- Communication type: UART or ETH -->
-    <arg name="com_type" default="UART"/>
-
-    <!-- UART port names (use AUTO for auto-detection, OFF to disable config port) -->
-    <arg name="uart_data_port" default="AUTO"/>
-    <arg name="uart_config_port" default="AUTO"/>
-
-    <!-- Ethernet settings -->
-    <arg name="remote_ip" default="192.168.1.111"/>
-    <arg name="local_data_port" default="1111"/>
-    <arg name="local_config_port" default="2222"/>
-    <arg name="local_odometer_port" default="3333"/>
-
-    <!-- Serial baud rate (230400 for GNSS INS/IMU+, 921600 for EVK) -->
-    <arg name="baud_rate" default="230400"/>
-
-    <!-- Frame IDs -->
-    <arg name="frame_id_imu" default="imu_link"/>
-    <arg name="frame_id_ins" default="ins_link"/>
-    <arg name="frame_id_gnss" default="gnss_link"/>
-    <arg name="frame_id_hdg" default="gnss_link"/>
-
-    <!-- TF broadcasting -->
-    <arg name="publish_tf" default="true"/>
-    <arg name="tf_parent_frame" default="odom"/>
-    <!-- REP-105 base_link; set ins_link for legacy odom->ins_link behavior -->
-    <arg name="tf_child_frame" default="base_link"/>
-
-    <!-- Polling interval (ms) -->
-    <arg name="poll_interval_ms" default="5"/>
-
-    <!-- ANELLO driver node -->
-    <node name="anello_ros_driver" pkg="anello_ros_driver" exec="anello_ros_driver_node" output="screen">
-        <param name="com_type" value="$(var com_type)"/>
-        <param name="uart_data_port" value="$(var uart_data_port)"/>
-        <param name="uart_config_port" value="$(var uart_config_port)"/>
-        <param name="baud_rate" value="$(var baud_rate)"/>
-        <param name="remote_ip" value="$(var remote_ip)"/>
-        <param name="local_data_port" value="$(var local_data_port)"/>
-        <param name="local_config_port" value="$(var local_config_port)"/>
-        <param name="local_odometer_port" value="$(var local_odometer_port)"/>
-        <param name="frame_id.imu" value="$(var frame_id_imu)"/>
-        <param name="frame_id.ins" value="$(var frame_id_ins)"/>
-        <param name="frame_id.gnss" value="$(var frame_id_gnss)"/>
-        <param name="frame_id.hdg" value="$(var frame_id_hdg)"/>
-        <param name="publish_tf" value="$(var publish_tf)"/>
-        <param name="tf_parent_frame" value="$(var tf_parent_frame)"/>
-        <param name="tf_child_frame" value="$(var tf_child_frame)"/>
-        <param name="poll_interval_ms" value="$(var poll_interval_ms)"/>
-    </node>
-
-    <!-- NTRIP client parameters -->
-    <arg name="host" default="127.0.0.1"/>
-    <arg name="port" default="2101"/>
-    <arg name="mountpoint" default=""/>
-    <arg name="authenticate" default="false"/>
-    <arg name="username" default=""/>
-    <arg name="password" default=""/>
-    <arg name="ntrip_version" default=""/>
-    <arg name="ssl" default="false"/>
-    <arg name="cert" default="None"/>
-    <arg name="key" default="None"/>
-    <arg name="ca_cert" default="None"/>
-
-    <!-- NTRIP client node (no namespace — topics are already prefixed in the node) -->
-    <node name="ntrip_client" pkg="ntrip_client" exec="ntrip_ros" output="screen">
-        <param name="host"       value="$(var host)"/>
-        <param name="port"       value="$(var port)"/>
-        <param name="mountpoint" value="$(var mountpoint)"/>
-        <param name="ntrip_version" value="$(var ntrip_version)"/>
-        <param name="authenticate" value="$(var authenticate)"/>
-        <param name="username" value="$(var username)"/>
-        <param name="password" value="$(var password)"/>
-        <param name="ssl" value="$(var ssl)"/>
-        <param name="cert" value="$(var cert)"/>
-        <param name="key"  value="$(var key)"/>
-        <param name="ca_cert" value="$(var ca_cert)"/>
-        <param name="rtcm_frame_id" value="odom"/>
-        <param name="reconnect_attempt_max" value="10"/>
-        <param name="reconnect_attempt_wait_seconds" value="5"/>
-        <param name="rtcm_timeout_seconds" value="4"/>
-    </node>
+  <arg name="ntrip_host" default=""/>
+  <arg name="host" default="$(var ntrip_host)"/>
+  <arg name="ntrip_port" default=""/>
+  <arg name="port" default="$(var ntrip_port)"/>
+  <arg name="ntrip_mountpoint" default=""/>
+  <arg name="mountpoint" default="$(var ntrip_mountpoint)"/>
+  <arg name="ntrip_authenticate" default=""/>
+  <arg name="authenticate" default="$(var ntrip_authenticate)"/>
+  <arg name="ntrip_username" default=""/>
+  <arg name="username" default="$(var ntrip_username)"/>
+  <arg name="ntrip_password" default=""/>
+  <arg name="password" default="$(var ntrip_password)"/>
+  <arg name="ntrip_ssl" default=""/>
+  <arg name="ssl" default="$(var ntrip_ssl)"/>
+  <arg name="ntrip_cert" default=""/>
+  <arg name="cert" default="$(var ntrip_cert)"/>
+  <arg name="ntrip_key" default=""/>
+  <arg name="key" default="$(var ntrip_key)"/>
+  <arg name="ntrip_ca_cert" default=""/>
+  <arg name="ca_cert" default="$(var ntrip_ca_cert)"/>
+  <include file="$(find-pkg-share anello_ros_driver)/launch/anello_driver.launch.py">
+    <arg name="ntrip_host" value="$(var host)"/>
+    <arg name="ntrip_port" value="$(var port)"/>
+    <arg name="ntrip_mountpoint" value="$(var mountpoint)"/>
+    <arg name="ntrip_authenticate" value="$(var authenticate)"/>
+    <arg name="ntrip_username" value="$(var username)"/>
+    <arg name="ntrip_password" value="$(var password)"/>
+    <arg name="ntrip_ssl" value="$(var ssl)"/>
+    <arg name="ntrip_cert" value="$(var cert)"/>
+    <arg name="ntrip_key" value="$(var key)"/>
+    <arg name="ntrip_ca_cert" value="$(var ca_cert)"/>
+  </include>
 </launch>

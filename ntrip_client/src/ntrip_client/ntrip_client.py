@@ -6,6 +6,9 @@ import base64
 import socket
 import select
 import logging
+import queue
+import re
+import threading
 
 from .nmea_parser import NMEAParser
 from .rtcm_parser import RTCMParser
@@ -14,20 +17,6 @@ _CHUNK_SIZE = 1024
 # Cap on the HTTP response header block read during connect(); a real
 # caster's headers fit well inside this.
 _MAX_RESPONSE_HEADER_BYTES = 16 * 1024
-_SOURCETABLE_RESPONSES = [
-    'SOURCETABLE 200 OK'
-]
-_SUCCESS_RESPONSES = [
-    'ICY 200 OK',
-    'HTTP/1.0 200 OK',
-    'HTTP/1.1 200 OK'
-]
-_UNAUTHORIZED_RESPONSES = [
-    '401'
-]
-_NOT_FOUND_RESPONSES = [
-    '404'
-]
 
 
 class NTRIPClient:
@@ -89,6 +78,7 @@ class NTRIPClient:
         self.ca_cert = None
 
         # Setup some state
+        self._resolver_result = None
         self._shutdown = False
         self._connected = False
 
@@ -105,6 +95,7 @@ class NTRIPClient:
         self._pending_stream_data = b''
         self._response_chunked = False
         self._chunk_buffer = b''
+        self._chunk_eof = False
 
         # Public reconnect info
         self.reconnect_attempt_max = self.DEFAULT_RECONNECT_ATTEMPT_MAX
@@ -120,7 +111,13 @@ class NTRIPClient:
         # Drop any partial RTCM frame left over from a previous
         # connection; it belongs to a dead TCP session and must not be
         # spliced onto this one's stream.
+        self.disconnect()
         self._rtcm_parser.reset()
+        self._pending_stream_data = b''
+        self._chunk_buffer = b''
+        self._chunk_eof = False
+        if self._shutdown:
+            return False
 
         # Every failure path must go through disconnect(): it closes the
         # socket (no fd left to leak toward GC) and clears _connected —
@@ -153,6 +150,7 @@ class NTRIPClient:
         # than rtcm_timeout_seconds), and the failure counters
         # belong to the dead connection.
         self._first_rtcm_received = False
+        self._recv_rtcm_last_packet_timestamp = time.monotonic()
         self._read_zero_bytes_count = 0
         self._nmea_send_failed_count = 0
         self._loginfo(
@@ -160,161 +158,129 @@ class NTRIPClient:
                 self._host, self._port, self._mountpoint))
         return True
 
-    def _open_socket(self):
-        # Create a socket object that we will use to connect to the server
-        self._server_socket = socket.socket(
-            socket.AF_INET, socket.SOCK_STREAM
-        )
-        self._server_socket.settimeout(5)
+    def _resolve(self, deadline):
+        # getaddrinfo has no portable cancellation API. Keep at most one
+        # daemon resolver per client; shutdown never waits for system DNS.
+        if self._resolver_result is None:
+            result = queue.Queue(maxsize=1)
+            self._resolver_result = result
 
-        # Connect the socket to the server
+            def resolve():
+                try:
+                    result.put(socket.getaddrinfo(
+                        self._host, self._port, type=socket.SOCK_STREAM))
+                except OSError as exc:
+                    result.put(exc)
+
+            threading.Thread(target=resolve, daemon=True).start()
+        while not self._shutdown and time.monotonic() < deadline:
+            try:
+                result = self._resolver_result.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            self._resolver_result = None
+            if isinstance(result, Exception):
+                raise result
+            return result
+        raise TimeoutError('DNS resolution cancelled or timed out')
+
+    def _open_socket(self):
+        deadline = time.monotonic() + 5.0
         try:
-            self._server_socket.connect((self._host, self._port))
-        except OSError as e:
-            self._logerr(
-                'Unable to connect socket to server at '
-                'http://{}:{}'.format(self._host, self._port))
-            self._logerr('Exception: {}'.format(str(e)))
+            addresses = self._resolve(deadline)
+            for family, kind, protocol, _, address in addresses:
+                if self._shutdown or time.monotonic() >= deadline:
+                    return False
+                sock = socket.socket(family, kind, protocol)
+                self._server_socket = sock
+                sock.settimeout(max(0.01, deadline - time.monotonic()))
+                try:
+                    sock.connect(address)
+                    if self.ssl:
+                        context = ssl.create_default_context()
+                        if self.cert:
+                            context.load_cert_chain(self.cert, self.key)
+                        if self.ca_cert:
+                            context.load_verify_locations(self.ca_cert)
+                        self._raw_socket = sock
+                        sock = context.wrap_socket(
+                            sock, server_hostname=self._host,
+                            do_handshake_on_connect=False)
+                        self._server_socket = sock
+                        sock.settimeout(max(0.01, deadline - time.monotonic()))
+                        sock.do_handshake()
+                    sock.settimeout(0.2)
+                    if self._shutdown:
+                        self.disconnect()
+                        return False
+                    return True
+                except OSError:
+                    self.disconnect()
+            return False
+        except (OSError, ValueError) as exc:
+            self._logwarn('NTRIP connection failed: {}'.format(exc))
             self.disconnect()
             return False
 
-        # If SSL, wrap the socket. wrap_socket() performs the TLS
-        # handshake, so cert problems and handshake failures surface
-        # here — they must fail the connect (and let reconnect retry),
-        # not propagate and kill the node.
-        if self.ssl:
-            try:
-                # Configre the context based on the config
-                self._ssl_context = ssl.create_default_context()
-                if self.cert:
-                    self._ssl_context.load_cert_chain(self.cert, self.key)
-                if self.ca_cert:
-                    self._ssl_context.load_verify_locations(self.ca_cert)
-
-                # Save the old socket for later just in case, and create
-                # a new SSL socket
-                self._raw_socket = self._server_socket
-                self._server_socket = self._ssl_context.wrap_socket(
-                    self._raw_socket, server_hostname=self._host
-                )
-            except OSError as e:
-                self._logerr(
-                    'Unable to set up SSL connection to server at '
-                    'https://{}:{}'.format(self._host, self._port))
-                self._logerr('Exception: {}'.format(str(e)))
-                self.disconnect()
-                return False
-        return True
-
     def _read_response_headers(self):
-        # Returns the decoded response header block, or None on a socket
-        # error. Side effects: stashes any stream bytes that arrived
-        # after the headers in _pending_stream_data and initializes the
-        # chunked-transfer state.
+        raw = b''
+        deadline = time.monotonic() + 5.0
+        sock = self._server_socket
         try:
-            raw_response = self._server_socket.recv(_CHUNK_SIZE)
-            # An HTTP/1.x header block ends with \r\n\r\n but may span
-            # several TCP segments; without the full block the
-            # Transfer-Encoding header can be missed and chunk framing
-            # would be fed to the RTCM parser. ICY responses may never
-            # send the terminator, so only real HTTP responses loop.
-            while (raw_response.startswith(b'HTTP/')
-                    and b'\r\n\r\n' not in raw_response
-                    and len(raw_response) < _MAX_RESPONSE_HEADER_BYTES):
-                more = self._server_socket.recv(_CHUNK_SIZE)
-                if not more:
-                    break
-                raw_response += more
-        except OSError as e:
-            self._logerr(
-                'Unable to read response from server at '
-                'http://{}:{}'.format(self._host, self._port))
-            self._logerr('Exception: {}'.format(str(e)))
+            # Accumulate a complete status line, even a split "HT" prefix.
+            while not self._shutdown and time.monotonic() < deadline:
+                line_end = raw.find(b'\r\n')
+                if line_end >= 0:
+                    status = raw[:line_end].decode('ascii')
+                    if not self._classify_response(status):
+                        return None
+                    if status.startswith('ICY '):
+                        end = line_end + 2
+                    else:
+                        end = raw.find(b'\r\n\r\n')
+                        end = end + 4 if end >= 0 else -1
+                    if end >= 0:
+                        if end > _MAX_RESPONSE_HEADER_BYTES:
+                            return None
+                        headers = raw[:end].decode('ascii')
+                        self._pending_stream_data = raw[end:]
+                        self._response_chunked = False
+                        for line in headers.split('\r\n')[1:]:
+                            name, separator, value = line.partition(':')
+                            if separator and name.lower() == 'transfer-encoding':
+                                if value.strip().lower() != 'chunked':
+                                    return None
+                                self._response_chunked = True
+                        return headers
+                if len(raw) >= _MAX_RESPONSE_HEADER_BYTES:
+                    return None
+                try:
+                    chunk = sock.recv(_CHUNK_SIZE)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    return None
+                raw += chunk
+        except (OSError, UnicodeError):
             return None
-
-        # The first packet may already contain stream data after the
-        # response headers; split on the header terminator so binary
-        # RTCM bytes are neither decoded as text nor thrown away.
-        header_end = raw_response.find(b'\r\n\r\n')
-        if header_end >= 0:
-            header_bytes = raw_response[:header_end + 4]
-            self._pending_stream_data = raw_response[header_end + 4:]
-        else:
-            header_bytes = raw_response
-            self._pending_stream_data = b''
-        response = header_bytes.decode('utf-8', errors='replace')
-
-        # NTRIP rev2 casters stream with HTTP/1.1 chunked transfer
-        # encoding; the chunk framing must be stripped before the RTCM
-        # parser sees the data.
-        self._response_chunked = any(
-            line.lower().startswith('transfer-encoding:')
-            and 'chunked' in line.lower()
-            for line in response.split('\r\n')
-        )
-        self._chunk_buffer = b''
-        return response
+        return None
 
     def _classify_response(self, response):
-        # Returns True when the response is an unambiguous success.
-        # Sets _connected on a success string; the caller resets it (via
-        # disconnect()) when classification fails overall.
-        if any(success in response for success in _SUCCESS_RESPONSES):
-            self._connected = True
-
-        # Some debugging hints about the kind of error we received
-        known_error = False
-        if any(
-            sourcetable in response
-            for sourcetable in _SOURCETABLE_RESPONSES
-        ):
-            self._logwarn(
-                'Received sourcetable response from the server. '
-                'This probably means the mountpoint specified is '
-                'not valid')
-            known_error = True
-        elif any(
-            unauthorized in response
-            for unauthorized in _UNAUTHORIZED_RESPONSES
-        ):
-            self._logwarn(
-                'Received unauthorized response from the server. '
-                'Check your username, password, and mountpoint to '
-                'make sure they are correct.')
-            known_error = True
-        elif any(
-            not_found in response
-            for not_found in _NOT_FOUND_RESPONSES
-        ):
-            self._logwarn(
-                'Received not-found response from the server. '
-                'The mountpoint specified is probably not valid.')
-            known_error = True
-        elif not self._connected and (
-            self._ntrip_version is None
-            or self._ntrip_version == ''
-        ):
-            self._logwarn(
-                'Received unknown error from the server. Note that '
-                'the NTRIP version was not specified in the launch '
-                'file. This is not necesarilly the cause of this '
-                'error, but it may be worth checking your NTRIP '
-                'casters documentation to see if the NTRIP version '
-                'needs to be specified.')
-            known_error = True
-
-        # Wish we could just return from the above checks, but some
-        # casters return both a success and an error in the response.
-        # If we received any known error, even if we received a
-        # success it should be considered a failure
-        if known_error or not self._connected:
-            self._logerr(
-                'Invalid response received from '
-                'http://{}:{}/{}'.format(
-                    self._host, self._port, self._mountpoint))
-            self._logerr('Response: {}'.format(response))
-            return False
-        return True
+        lines = response.split('\r\n')
+        match = re.fullmatch(r'(?:HTTP/1\.[01]|ICY) ([0-9]{3})(?: .*)?', lines[0])
+        valid = match is not None and match.group(1) == '200'
+        # Some casters explicitly supply an error Status header. Match its
+        # field and code, never arbitrary request IDs or other header text.
+        for line in lines[1:]:
+            name, separator, value = line.partition(':')
+            if separator and name.lower() in ('status', 'x-status'):
+                code = value.strip().split(' ', 1)[0]
+                if code in ('401', '404'):
+                    valid = False
+        self._connected = valid
+        if not valid:
+            self._logwarn('NTRIP response was not a successful stream status')
+        return valid
 
     def disconnect(self):
         # Disconnect the socket. Each socket gets its own shutdown and
@@ -342,160 +308,58 @@ class NTRIPClient:
         self._raw_socket = None
 
     def reconnect(self):
-        if self._connected:
-            while not self._shutdown:
-                self._reconnect_attempt_count += 1
-                self.disconnect()
-                connect_success = self.connect()
-                # Success must be checked before the attempt limit:
-                # otherwise a reconnect that succeeds on the final
-                # allowed attempt still raised "never succeeded".
-                if connect_success:
-                    self._reconnect_attempt_count = 0
-                    break
-                if (
-                    self._reconnect_attempt_count
-                    >= self.reconnect_attempt_max
-                ):
-                    attempts = self._reconnect_attempt_count
-                    self._reconnect_attempt_count = 0
-                    raise ConnectionError(
-                        "Reconnect was attempted {} times, but "
-                        "never succeeded".format(attempts))
-                self._logerr(
-                    'Reconnect to http://{}:{} failed. '
-                    'Retrying in {} seconds'.format(
-                        self._host, self._port,
-                        self.reconnect_attempt_wait_seconds))
-                time.sleep(self.reconnect_attempt_wait_seconds)
-        else:
-            self._logdebug(
-                'Reconnect called while not connected, ignoring')
+        # One attempt only. Persistent retry and its wait belong to the worker.
+        self.disconnect()
+        return self.connect() if not self._shutdown else False
+
+    def normalize_nmea(self, sentence):
+        if sentence.endswith('\\r\\n'):
+            sentence = sentence[:-4]
+        sentence = sentence.rstrip('\r\n') + '\r\n'
+        return sentence if self._nmea_parser.is_valid_sentence(sentence) else None
 
     def send_nmea(self, sentence):
-        if not self._connected:
-            self._logwarn(
-                'NMEA sent before client was connected, '
-                'discarding NMEA')
-            return
-
-        # Not sure if this is the right thing to do, but python will
-        # escape the return characters at the end of the string, so
-        # do this manually
-        if sentence[-4:] == '\\r\\n':
-            sentence = sentence[:-4] + '\r\n'
-        elif sentence[-2:] != '\r\n':
-            sentence = sentence + '\r\n'
-
-        # Check if it is a valid NMEA sentence
-        if not self._nmea_parser.is_valid_sentence(sentence):
-            self._logwarn(
-                "Invalid NMEA sentence, not sending to server")
-            return
-
-        # Encode the data and send it to the socket
+        sentence = self.normalize_nmea(sentence)
+        if not self._connected or sentence is None:
+            return False
         try:
-            self._server_socket.sendall(sentence.encode('utf-8'))
-        except Exception as e:
-            self._logwarn('Unable to send NMEA sentence to server.')
-            self._logwarn('Exception: {}'.format(str(e)))
+            self._server_socket.sendall(sentence.encode('ascii'))
+            self._nmea_send_failed_count = 0
+            return True
+        except (OSError, UnicodeError, AttributeError):
             self._nmea_send_failed_count += 1
-            if (
-                self._nmea_send_failed_count
-                >= self._nmea_send_failed_max
-            ):
-                self._logwarn(
-                    "NMEA sentence failed to send to server "
-                    "{} times, restarting".format(
-                        self._nmea_send_failed_count))
-                self.reconnect()
-                self._nmea_send_failed_count = 0
-                # Try sending the NMEA sentence again
-                self.send_nmea(sentence)
+            self.disconnect()
+            return False
 
     def recv_rtcm(self):
         if not self._connected:
-            self._logwarn(
-                'RTCM requested before client was connected, '
-                'returning empty list')
             return []
-
-        # If it has been too long since we received an RTCM packet,
-        # reconnect
-        if (
-            time.time() - self.rtcm_timeout_seconds
-            >= self._recv_rtcm_last_packet_timestamp
-            and self._first_rtcm_received
-        ):
-            self._logerr(
-                'RTCM data not received for {} seconds, '
-                'reconnecting'.format(self.rtcm_timeout_seconds))
-            self.reconnect()
-            self._first_rtcm_received = False
-
-        # Stream bytes that arrived in the same packet as the connect()
-        # response headers are consumed first.
         pending = self._pending_stream_data
         self._pending_stream_data = b''
-
-        # Check if there is any data available on the socket
-        if not self._data_available():
-            return self._parse_stream(pending) if pending else []
-
-        # Since we only ever pass the server socket to the list of
-        # read sockets, we can just read from that.
-        # Read all available data into a buffer. We re-check readability
-        # before every recv: a full-CHUNK read does not guarantee more data
-        # is waiting, and a blocking recv here would stall the caller for
-        # the full socket timeout (this runs inside the rclpy timer).
-        data = b''
-        while True:
-            try:
-                chunk = self._server_socket.recv(_CHUNK_SIZE)
-                data += chunk
-                if len(chunk) < _CHUNK_SIZE:
+        packets = self._parse_stream(pending) if pending else []
+        # Bounded work, including a continuously transmitting caster.
+        try:
+            for _ in range(16):
+                if not self._connected or not self._data_available():
                     break
-                if not self._data_available():
+                try:
+                    data = self._server_socket.recv(_CHUNK_SIZE)
+                except (socket.timeout, ssl.SSLWantReadError):
                     break
-            except Exception as e:
-                self._logerr(
-                    'Error while reading {} bytes from '
-                    'socket'.format(_CHUNK_SIZE))
-                self._logerr('Exception: {}'.format(str(e)))
-                if not self._socket_is_open():
-                    self._logerr(
-                        'Socket appears to be closed. '
-                        'Reconnecting')
-                    self.reconnect()
-                    return []
-                break
-        self._logdebug('Read {} bytes'.format(len(data)))
-
-        # If 0 bytes were read from the socket even though we were
-        # told data is available multiple times, it can be safely
-        # assumed that we can reconnect as the server has closed
-        # the connection
-        if len(data) == 0:
-            self._read_zero_bytes_count += 1
-            if (
-                self._read_zero_bytes_count
-                >= self._read_zero_bytes_max
-            ):
-                self._logwarn(
-                    'Reconnecting because we received 0 bytes '
-                    'from the socket even though it said there '
-                    'was data available {} times'.format(
-                        self._read_zero_bytes_count))
-                self.reconnect()
-                self._read_zero_bytes_count = 0
-                return []
-        else:
-            # Looks like we received valid data, so note when the
-            # data was received
-            self._recv_rtcm_last_packet_timestamp = time.time()
+                if not data:
+                    self.disconnect()
+                    break
+                packets.extend(self._parse_stream(data))
+        except (OSError, ValueError, AttributeError):
+            self.disconnect()
+        if packets:
             self._first_rtcm_received = True
-
-        return self._parse_stream(pending + data)
+            self._recv_rtcm_last_packet_timestamp = time.monotonic()
+        elif (time.monotonic() - self._recv_rtcm_last_packet_timestamp
+              >= self.rtcm_timeout_seconds):
+            self._logwarn('NTRIP valid-correction deadline expired')
+            self.disconnect()
+        return packets
 
     def _parse_stream(self, data):
         # Parse the byte stream into complete, checksum-verified RTCM
@@ -506,41 +370,43 @@ class NTRIPClient:
         return self._rtcm_parser.parse(data) if data else []
 
     def _dechunk(self, data):
-        # Incremental HTTP/1.1 chunked transfer-encoding decoder: strips
-        # the hex chunk-size lines and trailing CRLFs, returning only
-        # payload bytes. Incomplete chunks are buffered until more data
-        # arrives.
+        if self._chunk_eof:
+            return b''
         self._chunk_buffer += data
-        payload = b''
-        while True:
-            size_end = self._chunk_buffer.find(b'\r\n')
-            if size_end < 0:
-                break
-            size_token = self._chunk_buffer[:size_end].split(b';')[0].strip()
-            try:
-                chunk_size = int(size_token, 16)
-                if chunk_size < 0:
-                    raise ValueError(
-                        'negative chunk size: {}'.format(chunk_size))
-            except ValueError:
-                # Lost framing (e.g. mid-stream join): pass the buffer
-                # through so the RTCM parser can resync on the preamble.
-                self._logwarn(
-                    'Invalid chunk size {}, passing data through'.format(
-                        size_token[:16]))
-                payload += self._chunk_buffer
-                self._chunk_buffer = b''
-                break
-            if chunk_size == 0:
-                # Terminating chunk: the server is ending the stream
-                self._chunk_buffer = b''
-                break
-            chunk_end = size_end + 2 + chunk_size + 2
-            if len(self._chunk_buffer) < chunk_end:
-                break
-            payload += self._chunk_buffer[size_end + 2:size_end + 2 + chunk_size]
-            self._chunk_buffer = self._chunk_buffer[chunk_end:]
-        return payload
+        payload = bytearray()
+        try:
+            while True:
+                end = self._chunk_buffer.find(b'\r\n')
+                if end < 0:
+                    if len(self._chunk_buffer) > 128:
+                        raise ValueError('Oversized chunk header')
+                    break
+                if end > 128:
+                    raise ValueError('Oversized chunk header')
+                token = self._chunk_buffer[:end].split(b';', 1)[0]
+                if not re.fullmatch(b'[0-9a-fA-F]+', token):
+                    raise ValueError('Invalid chunk size')
+                size = int(token, 16)
+                if size > 1024 * 1024:
+                    raise ValueError('Chunk exceeds 1 MiB limit')
+                if size == 0:
+                    self._chunk_buffer = b''
+                    self._chunk_eof = True
+                    self.disconnect()
+                    break
+                boundary = end + 2 + size
+                if len(self._chunk_buffer) < boundary + 2:
+                    break
+                if self._chunk_buffer[boundary:boundary + 2] != b'\r\n':
+                    raise ValueError('Missing chunk terminator')
+                payload.extend(self._chunk_buffer[end + 2:boundary])
+                self._chunk_buffer = self._chunk_buffer[boundary + 2:]
+        except ValueError as exc:
+            self._logwarn(str(exc))
+            self._chunk_buffer = b''
+            self._chunk_eof = True
+            self.disconnect()
+        return bytes(payload)
 
     def _data_available(self):
         # select() only sees the raw fd. With TLS a single record can
@@ -562,10 +428,13 @@ class NTRIPClient:
     def _is_ntrip_v2(self):
         return (
             self._ntrip_version is not None
-            and '2' in str(self._ntrip_version)
+            and str(self._ntrip_version) in ('Ntrip/2.0', '2.0')
         )
 
     def _form_request(self):
+        for value in (self._host, self._mountpoint, self._ntrip_version or ''):
+            if any(char in value for char in ('\r', '\n')):
+                raise ValueError('NTRIP request fields cannot contain line endings')
         # NTRIP rev2 is proper HTTP/1.1 and requires the Host and
         # Ntrip-Version headers; rev1 casters expect an HTTP/1.0 request.
         # The Host header is legal in HTTP/1.0 too, so always send it.
@@ -586,30 +455,3 @@ class NTRIPClient:
                 self._basic_credentials)
         request_str += '\r\n'
         return request_str.encode('utf-8')
-
-    def _socket_is_open(self):
-        # SSL sockets do not support recv flags like MSG_PEEK, so we
-        # cannot probe without consuming data; assume the socket is open
-        if self.ssl:
-            return True
-        try:
-            # this will try to read bytes without blocking and also
-            # without removing them from buffer (peek only)
-            data = self._server_socket.recv(
-                _CHUNK_SIZE,
-                socket.MSG_DONTWAIT | socket.MSG_PEEK
-            )
-            if len(data) == 0:
-                return False
-        except BlockingIOError:
-            return True  # socket is open and reading would block
-        except ConnectionResetError:
-            self._logwarn('Connection reset by peer')
-            return False  # socket was closed for some other reason
-        except socket.timeout:
-            return True  # timeout likely means socket is still open
-        except Exception as e:
-            self._logwarn('Socket appears to be closed')
-            self._logwarn('Exception: {}'.format(e))
-            return False
-        return True

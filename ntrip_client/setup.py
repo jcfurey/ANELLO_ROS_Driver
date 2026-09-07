@@ -5,7 +5,7 @@ package_name = 'ntrip_client'
 
 setup(
     name=package_name,
-    version='3.1.0',
+    version='4.0.0',
     packages=find_packages(where='src'),
     package_dir={'': 'src'},
     data_files=[
@@ -19,10 +19,7 @@ setup(
     keywords=['ROS2', 'NTRIP', 'GNSS'],
     description='NTRIP client for the ANELLO ROS2 driver',
     license='MIT License',
-    # Deprecated in setuptools, but colcon-core reads it to select the
-    # pytest runner for this package — without it `colcon test` falls
-    # back to unittest and silently runs zero tests.
-    tests_require=['pytest'],
+    extras_require={'test': ['pytest']},
     entry_points={
         'console_scripts': [
             'ntrip_ros = ntrip_client.ntrip_ros:main',

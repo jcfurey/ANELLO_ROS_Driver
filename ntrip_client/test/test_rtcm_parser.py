@@ -97,3 +97,9 @@ def test_buffer_stays_bounded_under_garbage_flood():
     parser.parse(b'\x00' * 2048)
     frame = make_frame(b'\x43\x50' + b'\x02' * 15)
     assert parser.parse(frame) == [frame]
+
+
+def test_crc_valid_frame_without_message_number_is_rejected():
+    parser = RTCMParser()
+    assert parser.parse(make_frame(b'')) == []
+    assert parser.parse(make_frame(b'x')) == []

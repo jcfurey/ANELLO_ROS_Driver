@@ -18,13 +18,14 @@
 
 #include "base_interface.h"
 
-class ethernet_interface : base_interface
+class ethernet_interface : public base_interface
 {
 protected:
     std::string remote_ip_address;
     int local_port;
     int remote_port;
 
+    uint64_t truncated_=0;
     int sockfd;
     struct sockaddr_in servaddr, cliaddr;
 
@@ -32,11 +33,14 @@ public:
     ethernet_interface(std::string remote_ip_address, int remote_port, int local_port);
     ~ethernet_interface();
 
+    ethernet_interface(const ethernet_interface &)=delete;
+    ethernet_interface &operator=(const ethernet_interface &)=delete;
+    uint64_t truncated_datagrams() const { return truncated_; }
     void init();
 
     size_t get_data(char *buf, size_t buf_len);
     size_t get_data(char *buf, size_t buf_len, int timeout_ms);
-    void write_data(const char *buf, size_t buf_len);
+    bool write_data(const char *buf, size_t buf_len);
     std::string get_remote_ip() const { return remote_ip_address; }
 };
 

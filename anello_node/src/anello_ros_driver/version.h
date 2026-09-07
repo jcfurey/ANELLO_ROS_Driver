@@ -2,11 +2,11 @@
 #define VERSION_H
 
 #ifndef MAJOR_VERSION
-#define MAJOR_VERSION 3
+#define MAJOR_VERSION 4
 #endif
 
 #ifndef MINOR_VERSION
-#define MINOR_VERSION 2
+#define MINOR_VERSION 0
 #endif
 
 #ifndef PATCH_VERSION
@@ -14,6 +14,9 @@
 #endif
 
 /*
+v4.0.0 : Validated telemetry, explicit frames/covariance, persistent I/O recovery.
+         See doc/migration_v4.md.
+
 v3.2.0 : UART reconnect after unit power-cycle
             1. Detect tty hangup (USB re-enumeration) and close the stale
                fd instead of reading it forever

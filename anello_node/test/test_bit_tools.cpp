@@ -44,6 +44,17 @@ TEST(Checksum, AcceptsValidFrameRejectsCorrupt)
                        static_cast<int>(strlen(tampered))), 0);
 }
 
+TEST(Checksum, SupportsCompleteRepliesAndRejectsMalformedBoundaries)
+{
+    for (const std::string frame : {"#APPNG*48", "#APPNG*48\r", "#APPNG*48\r\n"}) {
+        EXPECT_NE(checksum(reinterpret_cast<const unsigned char *>(frame.data()), frame.size()), 0);
+    }
+    for (const std::string frame : {"", "#", "#A", "APPNG*48\r\n", "#APPNG*49\r\n",
+                                   "#APPNG*48\n", "#APPNG*48X\r\n", "#APPNG*48\r\nX"}) {
+        EXPECT_EQ(checksum(reinterpret_cast<const unsigned char *>(frame.data()), frame.size()), 0);
+    }
+}
+
 TEST(ParseFields, SplitsNameFieldsChecksum)
 {
     char buf[] = "#APGPS,1.0,2.0,3.0*5A\r";

@@ -8,7 +8,7 @@
  * License:     MIT License
  ********************************************************************************/
 
-#include "../main_anello_ros_driver.h"
+#include "../logging.h"
 #include "../bit_tools.h"
 
 #include <fcntl.h>
@@ -72,13 +72,9 @@ void anello_data_port::init()
     {
         this->init_ethernet();
     }
-    else if (this->auto_detect)
-    {
-        this->init_uart();
-    }
-    else
-    {
-        this->uart_port.init(this->config.data_port_name, this->config.baud_rate);
+    else {
+        try { this->init_uart(); }
+        catch (const std::exception &e) { WARNING_PRINT("Waiting for data port: %s",e.what()); }
     }
 }
 
@@ -207,6 +203,7 @@ void anello_data_port::port_confirm()
 
 void anello_data_port::port_confirm_uart()
 {
+    last_ok_=std::chrono::steady_clock::now();
     this->fail_count = 0;
     if (this->decode_success) return;
 
@@ -251,8 +248,14 @@ size_t anello_data_port::get_data_uart(char *buf, size_t buf_len, int timeout_ms
         // Only a blocking read that came up empty counts as "no data" for
         // port rotation; a 0 ms drain poll returning empty is the normal
         // end of a drained tick.
-        if (timeout_ms > 0)
-            this->port_parse_fail();
+        const auto now=std::chrono::steady_clock::now();
+        if (timeout_ms>0 || !uart_port.get_port_enabled() || now-last_ok_>std::chrono::seconds(2)) {
+            // One state-machine step per timer cadence, independent of the
+            // number of empty nonblocking drain reads.
+            if (now-last_retry_>=std::chrono::milliseconds(5)) {
+                last_retry_=now; this->port_parse_fail();
+            }
+        }
         return 0;
     }
     return bytes_read;
@@ -263,20 +266,20 @@ size_t anello_data_port::get_data_ethernet(char *buf, size_t buf_len)
     return this->ethernet_port.get_data(buf, buf_len);
 }
 
-void anello_data_port::write_data(const char *buf, size_t buf_len)
+bool anello_data_port::write_data(const char *buf, size_t buf_len)
 {
     if (this->config.type == ETH)
-        this->write_data_ethernet(buf, buf_len);
+        return this->write_data_ethernet(buf, buf_len);
     else
-        this->write_data_uart(buf, buf_len);
+        return this->write_data_uart(buf, buf_len);
 }
 
-void anello_data_port::write_data_uart(const char *buf, size_t buf_len)
+bool anello_data_port::write_data_uart(const char *buf, size_t buf_len)
 {
-    this->uart_port.write_data(buf, buf_len);
+    return this->uart_port.write_data(buf, buf_len);
 }
 
-void anello_data_port::write_data_ethernet(const char *buf, size_t buf_len)
+bool anello_data_port::write_data_ethernet(const char *buf, size_t buf_len)
 {
-    this->ethernet_port.write_data(buf, buf_len);
+    return this->ethernet_port.write_data(buf, buf_len);
 }

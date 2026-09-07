@@ -8,7 +8,7 @@
  * License:     MIT License
  ********************************************************************************/
 
-#include "../main_anello_ros_driver.h"
+#include "../logging.h"
 #include "ethernet_interface.h"
 
 #include <cerrno>
@@ -16,7 +16,7 @@
 #include <cstring>
 #include <unistd.h>
 #include <sys/types.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <stdexcept>
@@ -40,12 +40,15 @@ ethernet_interface::~ethernet_interface()
 
 void ethernet_interface::init()
 {
+    if (local_port<0 || local_port>65535 || remote_port<=0 || remote_port>65535)
+        throw std::invalid_argument("UDP port out of range");
     if (this->sockfd != -1)
     {
         close(this->sockfd);
+        this->sockfd=-1;
     }
 
-    if ((this->sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+    if ((this->sockfd = socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0)) < 0)
     {
         throw std::runtime_error("Ethernet socket creation failed: " +
                                  std::string(strerror(errno)));
@@ -58,7 +61,7 @@ void ethernet_interface::init()
     this->servaddr.sin_addr.s_addr = INADDR_ANY;
     this->servaddr.sin_port = htons(this->local_port);
 
-    if (bind(this->sockfd, (const struct sockaddr *)&(this->servaddr), sizeof(this->servaddr)) < 0)
+    if (bind(this->sockfd, reinterpret_cast<const sockaddr *>(&this->servaddr), sizeof(this->servaddr)) < 0)
     {
         close(this->sockfd);
         this->sockfd = -1;
@@ -80,11 +83,13 @@ void ethernet_interface::init()
     }
 }
 
-void ethernet_interface::write_data(const char *buf, size_t buf_len)
+bool ethernet_interface::write_data(const char *buf, size_t buf_len)
 {
-    if (this->sockfd < 0) return;
-    sendto(this->sockfd, buf, buf_len, 0,
-           (const struct sockaddr *)&(this->cliaddr), sizeof(this->cliaddr));
+    if (this->sockfd < 0) return false;
+    ssize_t sent;
+    do { sent=sendto(this->sockfd, buf, buf_len, 0,
+           reinterpret_cast<const sockaddr *>(&this->cliaddr), sizeof(this->cliaddr)); } while (sent<0 && errno==EINTR);
+    return sent>=0 && static_cast<size_t>(sent)==buf_len;
 }
 
 size_t ethernet_interface::get_data(char *buf, size_t buf_len)
@@ -99,12 +104,13 @@ size_t ethernet_interface::get_data(char *buf, size_t buf_len)
     memset(&srcaddr, 0, sizeof(srcaddr));
 
     // buf_len - 1 leaves room for the NUL terminator below.
-    int n = recvfrom(this->sockfd, buf, buf_len - 1, MSG_DONTWAIT,
-                     (struct sockaddr *)&srcaddr, &len);
+    int n = recvfrom(this->sockfd, buf, buf_len - 1, MSG_DONTWAIT|MSG_TRUNC,
+                     reinterpret_cast<sockaddr *>(&srcaddr), &len);
     if (n < 0)
     {
         return 0;
     }
+    if (static_cast<size_t>(n)>=buf_len) { ++truncated_; return 0; }
     if (srcaddr.sin_addr.s_addr != this->cliaddr.sin_addr.s_addr)
     {
         return 0;
@@ -117,18 +123,7 @@ size_t ethernet_interface::get_data(char *buf, size_t buf_len, int timeout_ms)
 {
     if (this->sockfd < 0) return 0;
 
-    fd_set read_set;
-    FD_ZERO(&read_set);
-    FD_SET(this->sockfd, &read_set);
-
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-    int ready = select(this->sockfd + 1, &read_set, nullptr, nullptr, &tv);
-    if (ready <= 0)
-    {
-        return 0;
-    }
+    pollfd pending{sockfd,POLLIN,0};
+    if (poll(&pending,1,timeout_ms<0?0:timeout_ms)<=0) return 0;
     return this->get_data(buf, buf_len);
 }

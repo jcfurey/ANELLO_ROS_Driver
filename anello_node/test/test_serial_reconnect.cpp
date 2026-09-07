@@ -11,6 +11,10 @@
 #include <unistd.h>
 
 #include <string>
+#include <thread>
+#include <filesystem>
+#include <poll.h>
+#include "../src/anello_ros_driver/comm/anello_config_port.h"
 
 #include "../src/anello_ros_driver/comm/anello_data_port.h"
 #include "../src/anello_ros_driver/comm/serial_interface.h"
@@ -68,13 +72,10 @@ protected:
         dir_ = std::string(tmpl) + "/";
     }
 
-    void TearDown() override
-    {
-        // Best-effort cleanup of the symlinks and directory.
-        std::string cmd = "rm -rf " + dir_;
-        if (system(cmd.c_str()) != 0) {
-            ADD_FAILURE() << "cleanup failed for " << dir_;
-        }
+    void TearDown() override {
+        std::error_code error;
+        std::filesystem::remove_all(dir_,error);
+        EXPECT_FALSE(error);
     }
 
     void link_port(const std::string &target, const std::string &name)
@@ -147,6 +148,7 @@ TEST_F(TempPortDir, AutoRescanFindsReenumeratedDevice)
     n = 0;
     for (int i = 0; i < 500 && n == 0; ++i) {
         n = port.get_data(buf, sizeof(buf), 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         if (n == 0 && second.master >= 0) {
             (void)!write(second.master, "#APY", 4);
         }
@@ -192,6 +194,7 @@ TEST_F(TempPortDir, AutoRescanSurvivesEmptyPortDir)
     size_t n = 0;
     for (int i = 0; i < 500 && n == 0; ++i) {
         n = port.get_data(buf, sizeof(buf), 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         if (n == 0) {
             (void)!write(second.master, "#APY", 4);
         }
@@ -232,10 +235,82 @@ TEST_F(TempPortDir, FixedNamePortIsReopened)
     n = 0;
     for (int i = 0; i < 1000 && n == 0; ++i) {
         n = port.get_data(buf, sizeof(buf), 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         if (n == 0 && second.master >= 0) {
             (void)!write(second.master, "#APY", 4);
         }
     }
     EXPECT_GT(n, 0u);
     EXPECT_EQ(port.get_portname(), dir_ + "ttyUSBfix");
+}
+
+TEST_F(TempPortDir, ConfigChannelRecoversStableSymlink) {
+    Pty first,second; ASSERT_TRUE(first.open_pty()); ASSERT_TRUE(second.open_pty());
+    link_port(first.slave_path,"config");
+    interface_config_t cfg; cfg.config_port_name=dir_+"config";
+    anello_config_port port(&cfg); port.init();
+    ASSERT_TRUE(port.write_data("hello",5));
+    char bytes[32]; ASSERT_EQ(read(first.master,bytes,sizeof(bytes)),5);
+    first.close_master(); unlink_port("config"); link_port(second.slave_path,"config");
+    port.poll();
+    for (int i=0;i<150 && !port.connected();++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); port.poll();
+    }
+    ASSERT_TRUE(port.connected()); ASSERT_TRUE(port.write_data("again",5));
+    pollfd ready{second.master,POLLIN,0}; ASSERT_EQ(poll(&ready,1,100),1);
+    ASSERT_EQ(read(second.master,bytes,sizeof(bytes)),5); EXPECT_EQ(std::string(bytes,5),"again");
+}
+
+TEST_F(TempPortDir, ConfigAutoAcceptsFragmentedReplyAfterCorruptLine) {
+    Pty device; ASSERT_TRUE(device.open_pty());
+    link_port(device.slave_path,"ttyUSB0");
+    interface_config_t cfg; cfg.config_port_name="AUTO";
+    anello_config_port port(&cfg,dir_); port.init();
+    pollfd ready{device.master,POLLIN,0}; ASSERT_EQ(poll(&ready,1,100),1);
+    char bytes[64]; const auto n=read(device.master,bytes,sizeof(bytes));
+    ASSERT_GT(n,0); EXPECT_EQ(std::string(bytes,n),"#APPNG*48\r\n");
+    const std::string first="#APPNG,0*00\r\n#APPNG,0*";
+    ASSERT_EQ(write(device.master,first.data(),first.size()),static_cast<ssize_t>(first.size()));
+    port.poll(); EXPECT_FALSE(port.connected());
+    ASSERT_EQ(write(device.master,"54\r\n",4),4);
+    for (int i=0;i<20 && !port.connected();++i) {
+        port.poll(); std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_TRUE(port.connected());
+}
+TEST(SerialInterface, DisabledPortDoesNotClaimTransmission) {
+    interface_config_t cfg; cfg.config_port_name="OFF";
+    anello_config_port port(&cfg); port.init(); port.poll();
+    EXPECT_FALSE(port.connected()); EXPECT_FALSE(port.write_data("test",4));
+}
+TEST(SerialInterface, BackpressureIsBoundedAndReported) {
+    Pty pty; ASSERT_TRUE(pty.open_pty());
+    serial_interface port; port.init(pty.slave_path,230400);
+    std::string large(1024*1024,'x');
+    const auto start=std::chrono::steady_clock::now();
+    EXPECT_FALSE(port.write_data(large.data(),large.size()));
+    EXPECT_LT(std::chrono::steady_clock::now()-start,std::chrono::milliseconds(500));
+}
+TEST(SerialInterface, PartialWritesCompleteWhenPeerDrains) {
+    Pty pty; ASSERT_TRUE(pty.open_pty());
+    serial_interface port; port.init(pty.slave_path,230400);
+    std::string sent(128*1024,'x'), received;
+    std::thread reader([&] {
+        char bytes[4096];
+        while (received.size()<sent.size()) {
+            pollfd ready{pty.master,POLLIN,0}; if (poll(&ready,1,500)<=0) break;
+            auto n=read(pty.master,bytes,sizeof(bytes)); if (n<=0) break;
+            received.append(bytes,n);
+        }
+    });
+    EXPECT_TRUE(port.write_data(sent.data(),sent.size())); reader.join();
+    EXPECT_EQ(sent,received);
+}
+TEST(SerialInterface, DescriptorZeroIsClosed) {
+    Pty pty; ASSERT_TRUE(pty.open_pty());
+    const int saved=dup(0); close(0);
+    serial_interface port; port.init(pty.slave_path,230400); port.close_port();
+    const bool closed=fcntl(0,F_GETFD)==-1;
+    if (saved>=0) { dup2(saved,0); close(saved); }
+    EXPECT_TRUE(closed);
 }

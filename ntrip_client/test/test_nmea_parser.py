@@ -77,3 +77,12 @@ def test_lowercase_hex_checksum_accepted():
     sentence = make_sentence(GGA_BODY)
     lowered = sentence[:-4] + sentence[-4:-2].lower() + '\r\n'
     assert parser.is_valid_sentence(lowered)
+
+
+def test_checksum_valid_embedded_line_ending_is_rejected():
+    assert not NMEAParser().is_valid_sentence(make_sentence('GPGGA,ok\r\nINJECTED'))
+
+
+def test_checksum_must_have_exactly_two_hex_digits():
+    sentence = make_sentence(GGA_BODY)
+    assert not NMEAParser().is_valid_sentence(sentence[:-4] + '0' + sentence[-4:])

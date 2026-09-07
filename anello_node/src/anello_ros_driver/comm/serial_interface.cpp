@@ -1,208 +1,105 @@
-/********************************************************************************
- * File Name:   serial_interface.cpp
- * Description: Defines the serial_interface class.
- *
- * Author:      Austin Johnson
- * Date:        7/1/23
- *
- * License:     MIT License
- ********************************************************************************/
-
-#include "../main_anello_ros_driver.h"
-#include "../bit_tools.h"
-
-#include <fcntl.h>
-#include <termios.h>
-#include <cerrno>
-#include <cstring>
-#include <unistd.h>
-#include <string>
-#include <sys/ioctl.h>
-#include <dirent.h>
-#include <vector>
-#include <stdexcept>
-
 #include "serial_interface.h"
-
-#define MAX_READ_NUM 1000
-#define SER_PORT_FLUSH_COUNT 20
-
-serial_interface::serial_interface()
-{
-    this->portname = "";
-    this->usb_fd = -1;
-    this->port_enabled = false;
-    this->baud_rate_ = 230400;
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdexcept>
+#include <termios.h>
+#include <unistd.h>
+namespace {
+struct FileDescriptor {
+    int value;
+    ~FileDescriptor() { if (value>=0) ::close(value); }
+};
 }
-
-void serial_interface::init(std::string portname, uint32_t baud_rate)
-{
-    this->baud_rate_ = baud_rate;
-    this->portname = portname;
-
-    if (this->portname == "OFF")
-    {
-        this->port_enabled = false;
-        return;
-    }
-
-    this->usb_fd = open(this->portname.c_str(), O_RDWR);
-    if (this->usb_fd < 0)
-    {
-        throw std::runtime_error("Failed to open serial port: " + this->portname +
-                                 " (" + std::string(strerror(errno)) + ")");
-    }
-
-    struct termios options;
-    memset(&options, 0, sizeof(options));
-    if (tcgetattr(this->usb_fd, &options) != 0)
-    {
-        close(this->usb_fd);
-        this->usb_fd = -1;
-        throw std::runtime_error("tcgetattr failed on " + this->portname +
-                                 ": " + std::string(strerror(errno)));
-    }
-
-    options.c_cflag &= ~PARENB;
-    options.c_cflag &= ~CSTOPB;
-    options.c_cflag &= ~CSIZE;
-    options.c_cflag |= CS8;
-    options.c_cflag &= ~CRTSCTS;
-    options.c_cflag |= CLOCAL | CREAD;
-    options.c_iflag = 0;
-    options.c_lflag = 0;
-    options.c_oflag = 0;
-    options.c_cc[VMIN] = 0;
-    options.c_cc[VTIME] = 5;     // 0.5 seconds read timeout
-
+void serial_interface::init(const std::string &name, uint32_t baud) {
+    close_port();
+    std::lock_guard<std::mutex> lock(mutex_);
+    portname=name;
+    if (name=="OFF") return;
     speed_t speed;
-    switch (this->baud_rate_) {
-      case 115200:   speed = B115200;   break;
-      case 230400:   speed = B230400;   break;
-      case 460800:   speed = B460800;   break;
-      case 921600:   speed = B921600;   break;
-      default:
-        WARNING_PRINT("Unsupported baud rate %u, falling back to 230400", this->baud_rate_);
-        speed = B230400;
+    switch (baud) {
+    case 115200: speed=B115200; break;
+    case 230400: speed=B230400; break;
+    case 460800: speed=B460800; break;
+    case 921600: speed=B921600; break;
+    default: throw std::invalid_argument("Unsupported serial baud rate");
     }
-    cfsetispeed(&options, speed);
-    cfsetospeed(&options, speed);
-
-    if (tcsetattr(this->usb_fd, TCSANOW, &options) != 0)
-    {
-        close(this->usb_fd);
-        this->usb_fd = -1;
-        throw std::runtime_error("tcsetattr failed on " + this->portname +
-                                 ": " + std::string(strerror(errno)));
-    }
-
-    for (int i = 0; i < SER_PORT_FLUSH_COUNT; i++)
-    {
-        usleep(1000);
-        tcflush(this->usb_fd, TCIOFLUSH);
-    }
-
-    this->port_enabled = true;
+    FileDescriptor fd{::open(name.c_str(),O_RDWR|O_NOCTTY|O_CLOEXEC|O_NONBLOCK)};
+    if (fd.value<0) throw std::runtime_error("Open "+name+": "+std::strerror(errno));
+    termios options{};
+    if (tcgetattr(fd.value,&options)!=0) throw std::runtime_error("tcgetattr: "+name);
+    cfmakeraw(&options);
+    options.c_cflag &= ~(PARENB|CSTOPB|CSIZE|CRTSCTS);
+    options.c_cflag |= CS8|CLOCAL|CREAD;
+    options.c_cc[VMIN]=0; options.c_cc[VTIME]=0;
+    cfsetispeed(&options,speed); cfsetospeed(&options,speed);
+    if (tcsetattr(fd.value,TCSANOW,&options)!=0) throw std::runtime_error("tcsetattr: "+name);
+    tcflush(fd.value,TCIOFLUSH);
+    usb_fd=fd.value; fd.value=-1; ++generation_;
 }
-
-size_t serial_interface::get_data(char *buf, size_t buf_len)
-{
-    if (!this->port_enabled || this->usb_fd < 0 || buf_len == 0)
-    {
-        return 0;
+int serial_interface::duplicate_fd() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return usb_fd<0?-1:fcntl(usb_fd,F_DUPFD_CLOEXEC,0);
+}
+size_t serial_interface::get_data(char *buf, size_t size, int timeout_ms) {
+    if (size<2) return 0;
+    const auto generation=generation_.load();
+    FileDescriptor fd{duplicate_fd()};
+    if (fd.value<0) return 0;
+    pollfd pending{fd.value,POLLIN,0};
+    const auto result=poll(&pending,1,std::max(0,timeout_ms));
+    if (result<=0) return 0;
+    const auto count=::read(fd.value,buf,size-1);
+    if (count>0 && generation==generation_) { buf[count]=0; return static_cast<size_t>(count); }
+    if ((pending.revents&(POLLHUP|POLLERR|POLLNVAL)) ||
+        (count<0 && errno!=EINTR && errno!=EAGAIN && errno!=EWOULDBLOCK)) {
+        close_generation(generation);
     }
-
-    ssize_t bytes_read = read(this->usb_fd, buf, buf_len - 1);
-    if (bytes_read < 0)
-    {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-        {
-            return 0;
+    return 0;
+}
+bool serial_interface::write_data(const char *buf, size_t size) {
+    if (size==0) return true;
+    const auto generation=generation_.load();
+    FileDescriptor fd{duplicate_fd()};
+    if (fd.value<0) return false;
+    // Duplicate ownership lets read/reopen continue independently while a
+    // transmitter is backpressured. The old fd can never target a new port.
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(100);
+    size_t sent=0;
+    while (sent<size && generation==generation_) {
+        if (std::chrono::steady_clock::now()>=deadline) return false;
+        auto n=::write(fd.value,buf+sent,size-sent);
+        if (n>0) { sent+=static_cast<size_t>(n); continue; }
+        if (n<0 && errno==EINTR) continue;
+        if (n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) {
+            pollfd pending{fd.value,POLLOUT,0};
+            auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline-std::chrono::steady_clock::now()).count();
+            if (remaining<=0 || poll(&pending,1,static_cast<int>(remaining))==0) return false;
+            continue;
         }
-        // EIO/ENXIO: the tty lost its device (USB unplug, or the unit
-        // power-cycled and re-enumerated). This fd can never produce
-        // data again — close so the owner reopens or rescans.
-        WARNING_PRINT("Serial port %s read failed (%s) — closing port",
-                      this->portname.c_str(), strerror(errno));
-        this->close_port();
-        return 0;
+        close_generation(generation);
+        return false;
     }
-    buf[bytes_read] = '\0';
-    return static_cast<size_t>(bytes_read);
+    return sent==size && generation==generation_;
 }
-
-size_t serial_interface::get_data(char *buf, size_t buf_len, int timeout)
-{
-    if (!this->port_enabled || this->usb_fd < 0)
-    {
-        return 0;
-    }
-
-    fd_set readSet;
-    FD_ZERO(&readSet);
-    FD_SET(this->usb_fd, &readSet);
-
-    // Split into sec/usec: a timeout >= 1000 ms would otherwise push
-    // tv_usec past 1e6, which select() rejects with EINVAL.
-    struct timeval tv;
-    tv.tv_sec = timeout / 1000;
-    tv.tv_usec = (timeout % 1000) * 1000;
-
-    int ready = select(this->usb_fd + 1, &readSet, nullptr, nullptr, &tv);
-    if (ready <= 0)
-    {
-        return 0;
-    }
-
-    size_t bytes_read = serial_interface::get_data(buf, buf_len);
-    if (bytes_read == 0 && this->port_enabled)
-    {
-        // select() reported readable but read() produced nothing: that is
-        // the tty hangup signature (device gone), not a timeout — a
-        // timeout returns above with ready == 0. The EIO case has already
-        // closed the port inside get_data(); this catches the EOF form.
-        WARNING_PRINT("Serial port %s hangup — closing port",
-                      this->portname.c_str());
-        this->close_port();
-    }
-    return bytes_read;
+std::string serial_interface::get_portname() const {
+    std::lock_guard<std::mutex> lock(mutex_); return portname;
 }
-
-void serial_interface::write_data(const char *buf, size_t buf_len)
-{
-    if (!this->port_enabled || this->usb_fd < 0)
-    {
-        return;
-    }
-    ssize_t written = write(usb_fd, buf, buf_len);
-    if (written < 0 || static_cast<size_t>(written) != buf_len)
-    {
-        WARNING_PRINT("Serial write: expected %zu bytes, wrote %zd", buf_len, written);
+bool serial_interface::get_port_enabled() const {
+    std::lock_guard<std::mutex> lock(mutex_); return usb_fd>=0;
+}
+void serial_interface::close_port() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (usb_fd>=0) { ::close(usb_fd); usb_fd=-1; ++generation_; }
+}
+void serial_interface::close_generation(uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation==generation_ && usb_fd>=0) {
+        ::close(usb_fd); usb_fd=-1; ++generation_;
     }
 }
-
-const std::string serial_interface::get_portname() const
-{
-    return this->portname;
-}
-
-bool serial_interface::get_port_enabled()
-{
-    return this->port_enabled;
-}
-
-void serial_interface::close_port()
-{
-    if (this->usb_fd > 0)
-    {
-        tcflush(this->usb_fd, TCIOFLUSH);
-        close(this->usb_fd);
-        this->usb_fd = -1;
-    }
-    this->port_enabled = false;
-}
-
-serial_interface::~serial_interface()
-{
-    this->close_port();
-}
+serial_interface::~serial_interface() { close_port(); }

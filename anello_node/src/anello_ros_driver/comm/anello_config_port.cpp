@@ -1,236 +1,68 @@
-/********************************************************************************
- * File Name:   anello_config_port.cpp
- * Description: Defines the anello_config_port class.
- *
- * Author:      Austin Johnson
- * Date:        7/12/24
- *
- * License:     MIT License
- ********************************************************************************/
-
-#include "../main_anello_ros_driver.h"
-#include "../bit_tools.h"
-
-#include <fcntl.h>
-#include <termios.h>
-#include <cstring>
-#include <unistd.h>
-#include <string>
-#include <sys/ioctl.h>
-#include <dirent.h>
-#include <vector>
-#include <stdexcept>
-
 #include "anello_config_port.h"
-
-anello_config_port::anello_config_port(const interface_config_t *config)
-    : uart_port(),
-      ethernet_port(config->remote_ip, 2, config->local_config_port)  // remote port 2 = ANELLO config channel
-{
-    this->config = *config;
+#include "../bit_tools.h"
+#include <algorithm>
+#include <filesystem>
+#include <vector>
+anello_config_port::anello_config_port(const interface_config_t *config, std::string directory)
+    : config_(*config), ethernet_(config->remote_ip,2,config->local_config_port),
+      directory_(std::move(directory)) {}
+void anello_config_port::init() {
+    if (config_.type==ETH) { ethernet_.init(); confirmed_=true; }
+    else poll();
 }
-
-anello_config_port::~anello_config_port()
-{
-    // Members are destroyed automatically — no manual destructor calls
-}
-
-void anello_config_port::init()
-{
-    if (this->config.type == ETH)
-    {
-        this->init_ethernet();
+void anello_config_port::poll() {
+    if (config_.type==ETH || config_.config_port_name=="OFF") return;
+    const auto now=std::chrono::steady_clock::now();
+    if (confirmed_ && uart_.get_port_enabled()) {
+        // Detect a hangup even with no commands or odometer input. These
+        // unsolicited config bytes have no waiting service consumer.
+        char discard[512]; uart_.get_data(discard,sizeof(discard),0);
+        if (uart_.get_port_enabled()) return;
     }
-    else
-    {
-        this->init_uart();
-    }
-}
-
-void anello_config_port::init_uart()
-{
-    if (this->config.config_port_name == "AUTO")
-    {
-        DIR *dir = opendir(PORT_DIR);
-        if (nullptr == dir)
-        {
-            throw std::runtime_error("Failed to open port directory: " +
-                                     std::string(PORT_DIR));
-        }
-
-        struct dirent *entry;
-        std::vector<std::string> port_names;
-        while ((entry = readdir(dir)) != nullptr)
-        {
-            std::string temp_port_name = PORT_DIR;
-            if (strncmp(entry->d_name, PORT_PREFIX, strlen(PORT_PREFIX)) == 0)
-            {
-                temp_port_name += entry->d_name;
-                port_names.insert(port_names.begin(), temp_port_name);
+    confirmed_=false;
+    if (probing_) {
+        char response[256]; auto n=uart_.get_data(response,sizeof(response),0);
+        probe_response_.append(response,n);
+        auto end=probe_response_.find("\r\n");
+        while (end!=std::string::npos) {
+            auto line=probe_response_.substr(0,end+2);
+            probe_response_.erase(0,end+2);
+            if ((line.rfind("#APPNG,",0)==0 || line.rfind("#APPNG*",0)==0) && checksum(reinterpret_cast<const unsigned char *>(line.data()),line.size())) {
+                confirmed_=true; probing_=false; return;
             }
+            end=probe_response_.find("\r\n");
         }
-        closedir(dir);
-
-        if (port_names.empty())
-        {
-            throw std::runtime_error("No serial ports found matching " +
-                                     std::string(PORT_DIR) + std::string(PORT_PREFIX) + "*");
-        }
-
-        std::string command = "#APPNG*48\r\n";
-        bool port_found = false;
-        int max_attempts = 10;
-
-        for (int attempt = 0; attempt < max_attempts && !port_found; ++attempt)
-        {
-            for (const auto &port_name : port_names)
-            {
-                try {
-                    this->config.config_port_name = port_name;
-                    this->uart_port.init(this->config.config_port_name, this->config.baud_rate);
-                    char buf[100] = {0};
-
-                    // Drain whatever is already buffered on this port before
-                    // sending the probe; its contents (and any leftover from
-                    // a previous candidate) must not leak into the response
-                    // check below, and a read timeout leaves buf untouched.
-                    this->uart_port.get_data(buf, 100, 10);
-                    this->uart_port.write_data(command.c_str(), command.length());
-                    usleep(500 * 1000);
-                    memset(buf, 0, sizeof(buf));
-                    size_t n = this->uart_port.get_data(buf, 100, 10);
-
-                    if (n > 0 && strstr(buf, "#APPNG") != nullptr)
-                    {
-                        port_found = true;
-                        DEBUG_PRINT("Config port found: %s", port_name.c_str());
-                        break;
-                    }
-                    else
-                    {
-                        this->uart_port.close_port();
-                    }
-                } catch (const std::exception &e) {
-                    // Port failed to open, try next
-                    this->uart_port.close_port();
-                }
-            }
-
-            if (!port_found)
-            {
-                WARNING_PRINT("Config port not found (attempt %d/%d), retrying...",
-                              attempt + 1, max_attempts);
-                usleep(1000 * 1000); // 1 second between retry rounds
-            }
-        }
-
-        if (!port_found)
-        {
-            throw std::runtime_error("Config port auto-detection failed after " +
-                                     std::to_string(max_attempts) + " attempts");
-        }
+        if (now<deadline_ && probe_response_.size()<1024 && uart_.get_port_enabled()) return;
+        probing_=false; uart_.close_port();
     }
-    else
-    {
-        this->uart_port.init(this->config.config_port_name, this->config.baud_rate);
+    if (now<deadline_) return;
+    deadline_=now+std::chrono::milliseconds(500);
+    std::string name=config_.config_port_name;
+    if (name=="AUTO") {
+        std::vector<std::string> ports;
+        std::error_code error;
+        for (const auto &entry:std::filesystem::directory_iterator(directory_,error))
+            if (entry.path().filename().string().rfind(PORT_PREFIX,0)==0) ports.push_back(entry.path());
+        std::sort(ports.rbegin(),ports.rend());
+        if (ports.empty()) return;
+        name=ports[scan_index_++%ports.size()];
     }
+    try {
+        uart_.init(name,config_.baud_rate);
+        if (config_.config_port_name=="AUTO") {
+            probe_response_.clear(); probing_=uart_.write_data("#APPNG*48\r\n",11);
+            if (!probing_) uart_.close_port();
+        } else confirmed_=true;
+    } catch (const std::exception &) { uart_.close_port(); }
 }
-
-void anello_config_port::init_ethernet()
-{
-    this->ethernet_port.init();
-
-    // Mirror init_uart's handshake validation: send #APPNG and look for
-    // the echo. Without this, a wrong remote_ip or a firewall left the
-    // node looking "initialized" while the device never responded.
-    std::string command = "#APPNG*48\r\n";
-    constexpr int max_attempts = 5;
-
-    for (int attempt = 1; attempt <= max_attempts; ++attempt)
-    {
-        char buf[100] = {0};
-        this->ethernet_port.write_data(command.c_str(), command.length());
-        size_t n = this->ethernet_port.get_data(buf, sizeof(buf) - 1, 500);
-        if (n > 0 && strstr(buf, "#APPNG") != nullptr)
-        {
-            DEBUG_PRINT("Config port (eth) confirmed at %s",
-                        this->config.remote_ip.c_str());
-            return;
-        }
-        WARNING_PRINT("Config port (eth): no #APPNG response from %s (attempt %d/%d)",
-                      this->config.remote_ip.c_str(), attempt, max_attempts);
-    }
-    // Not fatal: data may still flow on the data channel; commands won't work.
-    ERROR_PRINT("Config port (eth): no ANELLO device responded at %s after %d "
-                "attempts. Check remote_ip, ports, and firewall.",
-                this->config.remote_ip.c_str(), max_attempts);
+size_t anello_config_port::get_data(char *buf, size_t size, int timeout_ms) {
+    if (!confirmed_) return 0;
+    return config_.type==ETH?ethernet_.get_data(buf,size,timeout_ms):uart_.get_data(buf,size,timeout_ms);
 }
-
-size_t anello_config_port::get_data(char *buf, size_t buf_len)
-{
-    if (this->config.type == ETH)
-        return this->get_data_ethernet(buf, buf_len);
-    else
-        return this->get_data_uart(buf, buf_len);
-}
-
-size_t anello_config_port::get_data(char *buf, size_t buf_len, int timeout_ms)
-{
-    if (this->config.type == ETH)
-        return this->ethernet_port.get_data(buf, buf_len, timeout_ms);
-    else
-        return this->uart_port.get_data(buf, buf_len, timeout_ms);
-}
-
-size_t anello_config_port::get_data_uart(char *buf, size_t buf_len)
-{
-    return this->uart_port.get_data(buf, buf_len);
-}
-
-size_t anello_config_port::get_data_ethernet(char *buf, size_t buf_len)
-{
-    return this->ethernet_port.get_data(buf, buf_len);
-}
-
-void anello_config_port::write_data(const char *buf, size_t buf_len)
-{
-    if (this->config.type == ETH)
-        this->write_data_ethernet(buf, buf_len);
-    else
-        this->write_data_uart(buf, buf_len);
-}
-
-void anello_config_port::write_data_uart(const char *buf, size_t buf_len)
-{
-    this->uart_port.write_data(buf, buf_len);
-}
-
-void anello_config_port::write_data_ethernet(const char *buf, size_t buf_len)
-{
-    this->ethernet_port.write_data(buf, buf_len);
-}
-
-double anello_config_port::get_baseline()
-{
-    std::string command = "#APVEH,R,bsl*65\r\n";
-    char *field_array[MAXFIELD];
-    char buf[100] = {0};
-
-    this->write_data(command.c_str(), command.length());
-    usleep(500 * 1000);
-    this->get_data(buf, 100);
-
-    int num_fields = parse_fields(buf, field_array);
-    if (num_fields < 3)
-    {
-        return 0.0;
-    }
-
-    if ((strstr(field_array[0], "APVEH") == nullptr) ||
-        (strstr(field_array[1], "bsl") == nullptr))
-    {
-        return 0.0;
-    }
-
-    return atof(field_array[2]);
+bool anello_config_port::write_data(const char *buf, size_t size) {
+    if (!confirmed_) poll();
+    if (!confirmed_) return false;
+    const bool sent=config_.type==ETH?ethernet_.write_data(buf,size):uart_.write_data(buf,size);
+    if (!sent && config_.type==UART) confirmed_=false;
+    return sent;
 }

@@ -36,6 +36,7 @@ void feed_gps(health_message &h, double speed, double heading,
     double msg[16] = {};
     msg[6] = speed;
     msg[7] = heading;
+    msg[11] = 3;
     msg[8] = 0.5;
     msg[14] = heading_acc;
     h.add_gps_message(msg);
@@ -82,7 +83,7 @@ TEST(GyroHealth, StuckMemsChannelIsBad)
 TEST(GyroHealth, StuckFogChannelIsBad)
 {
     health_message h;
-    // FOG frozen at a nonzero constant (zero would mean disabled)
+    // FOG frozen at a nonzero constant.
     feed_imu(h, kFill, 0.0, 0.05, 0.02, 0.0);
     EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
 }
@@ -90,6 +91,7 @@ TEST(GyroHealth, StuckFogChannelIsBad)
 TEST(GyroHealth, DisabledFogIsNotAFault)
 {
     health_message h;
+    h.set_fog_enabled(false);
     // APCFG fog off: OG_WZ exactly 0 forever
     feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.0);
     EXPECT_EQ(h.get_gyro_status(), GYRO_GOOD);
@@ -110,13 +112,10 @@ TEST(GyroHealth, SmallDiscrepancyWithinGateIsGood)
     EXPECT_EQ(h.get_gyro_status(), GYRO_GOOD);
 }
 
-TEST(GyroHealth, FogDropoutSamplesAreSkipped)
+TEST(GyroHealth, FogDropoutSamplesDegradeHealth)
 {
     health_message h;
-    // Steady 5 deg/s rotation on both channels, but every 3rd FOG sample
-    // drops out to exactly 0. Skipping the zeros keeps the FOG mean at
-    // the true rate; averaging them in would bias it toward ~3.3 deg/s
-    // and trip a spurious discrepancy fault (gate is 0.25 deg/s).
+    // An enabled FOG intermittently returning zero must degrade health.
     double msg[16] = {};
     for (int i = 0; i < kFill; ++i) {
         const double s = (i % 2 == 0) ? 1.0 : -1.0;
@@ -125,7 +124,7 @@ TEST(GyroHealth, FogDropoutSamplesAreSkipped)
         msg[7] = (i % 3 == 0) ? 0.0 : 5.0 + s * 0.01;
         h.add_imu_message(msg);
     }
-    EXPECT_EQ(h.get_gyro_status(), GYRO_GOOD);
+    EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
 }
 
 TEST(GyroHealth, FogSaturationIsNotAFault)
@@ -178,6 +177,7 @@ TEST(HeadingHealth, AgreementAtSpeedStaysStable)
 TEST(HeadingHealth, FogDisabledRotationStillGatesComparisons)
 {
     health_message h;
+    h.set_fog_enabled(false);
     // FOG disabled: every OG_WZ sample is exactly 0 (skipped, window
     // never fills). The vehicle is turning at 15 deg/s on the MEMS
     // gyro, so GNSS-vs-INS heading epochs lag and disagree — the
@@ -195,6 +195,7 @@ TEST(HeadingHealth, FogDisabledRotationStillGatesComparisons)
 TEST(HeadingHealth, FogDisabledStationaryMismatchStillTrips)
 {
     health_message h;
+    h.set_fog_enabled(false);
     // Same FOG-disabled unit, but not rotating: real mismatches must
     // still be detected through the MEMS fallback gate.
     feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.0);
@@ -244,7 +245,7 @@ TEST(HeadingHealth, UninitializedInsResetsStreak)
     // INS drops to attitude-only before the streak reaches 4
     feed_gps(h, 5.0, 90.0, 0.5);
     feed_ins(h, 0.0, /*status=*/1.0);
-    EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
+    EXPECT_EQ(h.get_heading_status(), HEADING_UNAVAILABLE);
 }
 
 TEST(PositionHealth, RtkFixedIsCmLevel)
@@ -252,12 +253,14 @@ TEST(PositionHealth, RtkFixedIsCmLevel)
     health_message h;
     double msg[16] = {};
     msg[6] = 5.0;
+    msg[11] = 3;
     msg[8] = 0.02;   // hacc
     msg[15] = 2.0;   // RTK fixed
     h.add_gps_message(msg);
     EXPECT_EQ(h.get_position_status(), CM_LEVEL_ACCURACY);
 
     msg[15] = 0.0;   // SPP with sub-meter accuracy
+    msg[11] = 3;
     msg[8] = 0.5;
     h.add_gps_message(msg);
     EXPECT_EQ(h.get_position_status(), SUB_METER_LEVEL_ACCURACY);
@@ -265,4 +268,19 @@ TEST(PositionHealth, RtkFixedIsCmLevel)
     msg[8] = 5.0;    // poor accuracy
     h.add_gps_message(msg);
     EXPECT_EQ(h.get_position_status(), GPS_ACC_POOR);
+}
+
+TEST(GyroHealth, WarmupIsUnavailableAndZeroDropoutCannotStayHealthy) {
+    health_message h;
+    EXPECT_EQ(h.get_gyro_status(),GYRO_UNAVAILABLE);
+    feed_imu(h,kFill,0,0.05,0,0.01);
+    ASSERT_EQ(h.get_gyro_status(),GYRO_GOOD);
+    feed_imu(h,1000,0,0.05,0,0);
+    EXPECT_EQ(h.get_gyro_status(),GYRO_BAD);
+}
+TEST(PositionHealth, NoFixOverridesRetainedRtkAndAccuracy) {
+    health_message h;
+    double msg[16]={}; msg[8]=0.01; msg[15]=2;
+    h.add_gps_message(msg);
+    EXPECT_EQ(h.get_position_status(),POSITION_UNAVAILABLE);
 }

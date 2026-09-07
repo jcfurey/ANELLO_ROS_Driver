@@ -1,4 +1,5 @@
 import logging
+import re
 
 _NMEA_MAX_LENGTH = 82
 _NMEA_MIN_LENGTH = 3
@@ -58,9 +59,14 @@ class NMEAParser:
             self._logwarn('Sentence: {}'.format(sentence))
             return False
 
+        if not sentence.isascii() or any(ord(c) < 32 for c in sentence[:-2]):
+            return False
+
         # Checksum check
         data, expected_checksum_str = sentence.rsplit(
             _NMEA_CHECKSUM_SEPERATOR, 1)
+        if not re.fullmatch(r'[0-9A-Fa-f]{2}\r\n', expected_checksum_str):
+            return False
         try:
             expected_checksum = int(expected_checksum_str, 16)
         except ValueError:

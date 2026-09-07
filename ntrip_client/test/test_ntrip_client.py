@@ -124,20 +124,22 @@ def test_dechunk_chunk_extension_tokens():
     assert client._dechunk(b'7;ext=1\r\n' + payload + b'\r\n') == payload
 
 
-def test_dechunk_passes_through_unframed_data():
+def test_dechunk_rejects_unframed_data():
     client = make_client()
     raw = b'\xd3\x00\x06 not chunked\r\n'
     out = client._dechunk(raw)
-    assert out.startswith(b'\xd3')
+    assert out == b''
+    assert client._chunk_eof
 
 
-def test_dechunk_negative_chunk_size_passes_through():
+def test_dechunk_rejects_negative_chunk_size():
     # int(token, 16) accepts a signed token; a negative size must be
     # treated as malformed framing (like a ValueError), not used to
     # slice the buffer and silently emit corrupted bytes.
     client = make_client()
     raw = b'-5\r\nhello\r\n'
-    assert client._dechunk(raw) == raw
+    assert client._dechunk(raw) == b''
+    assert client._chunk_eof
 
 
 def test_connect_resets_stale_rtcm_buffer():
@@ -228,35 +230,87 @@ def test_recv_rtcm_consumes_pending_stream_data():
     assert packets == [frame]
 
 
-def test_reconnect_success_on_final_attempt_does_not_raise():
-    # Guards the reconnect off-by-one fix: succeeding on the last
-    # allowed attempt used to still raise "never succeeded".
+def test_reconnect_makes_one_attempt_without_sleep():
     client = make_client()
-    client._connected = True
-    client.reconnect_attempt_max = 3
-    client.reconnect_attempt_wait_seconds = 0
-    results = iter([False, False, True])
-    client.connect = lambda: next(results)
-    client.disconnect = lambda: None
-    client.reconnect()
-    assert client._reconnect_attempt_count == 0
-
-
-def test_reconnect_exhaustion_raises_after_max_attempts():
-    client = make_client()
-    client._connected = True
-    client.reconnect_attempt_max = 3
-    client.reconnect_attempt_wait_seconds = 0
     calls = []
     client.connect = lambda: calls.append(1) or False
-    client.disconnect = lambda: None
-    with pytest.raises(ConnectionError):
-        client.reconnect()
-    assert len(calls) == 3
-    assert client._reconnect_attempt_count == 0
+    assert client.reconnect() is False
+    assert calls == [1]
 
 
-def test_reconnect_ignored_when_not_connected():
+def test_shutdown_disables_reconnect():
     client = make_client()
-    client.connect = lambda: pytest.fail('connect must not be called')
-    client.reconnect()
+    client.shutdown()
+    client.connect = lambda: pytest.fail('connect after shutdown')
+    assert client.reconnect() is False
+
+
+@pytest.mark.parametrize('split', [1, 2, 4, 13])
+def test_fragmented_status_prefix(split):
+    response = b'HTTP/1.1 200 OK\r\nX-Request-ID: 4040\r\n\r\n'
+    client, ok = connect_to_fake_caster([response[:split], response[split:]])
+    try:
+        assert ok
+    finally:
+        client.disconnect()
+
+
+def test_icy_single_crlf_preserves_first_correction():
+    frame = make_rtcm_frame(b'\x43\x50abcd')
+    client, ok = connect_to_fake_caster([b'ICY 200 OK\r\n' + frame])
+    try:
+        assert ok
+        assert client.recv_rtcm() == [frame]
+    finally:
+        client.disconnect()
+
+
+@pytest.mark.parametrize('raw', [
+    b'1000001\r\n', b'1' * 129, b'4\r\nabcdXX', b'+4\r\nabcd\r\n'])
+def test_malformed_chunks_close_connection(raw):
+    client = make_client()
+    client._connected = True
+    assert client._dechunk(raw) == b''
+    assert not client.connected
+    assert client._chunk_buffer == b''
+
+
+def test_first_frame_and_valid_frame_deadlines(monkeypatch):
+    client = make_client()
+    client._connected = True
+    client._recv_rtcm_last_packet_timestamp = 10
+    client._data_available = lambda: False
+    client._pending_stream_data = b'garbage is not a correction'
+    monkeypatch.setattr('ntrip_client.ntrip_client.time.monotonic', lambda: 15)
+    assert client.recv_rtcm() == []
+    assert not client.connected
+
+
+def test_partial_correction_does_not_refresh_deadline(monkeypatch):
+    client = make_client()
+    client._connected = True
+    client._recv_rtcm_last_packet_timestamp = 10
+    client._data_available = lambda: False
+    client._pending_stream_data = make_rtcm_frame(b'\x43\x50abcd')[:-1]
+    monkeypatch.setattr('ntrip_client.ntrip_client.time.monotonic', lambda: 15)
+    assert client.recv_rtcm() == []
+    assert not client.connected
+
+
+def test_valid_correction_refreshes_deadline(monkeypatch):
+    client = make_client()
+    client._connected = True
+    client._recv_rtcm_last_packet_timestamp = 10
+    client._data_available = lambda: False
+    frame = make_rtcm_frame(b'\x43\x50abcd')
+    client._pending_stream_data = frame
+    monkeypatch.setattr('ntrip_client.ntrip_client.time.monotonic', lambda: 15)
+    assert client.recv_rtcm() == [frame]
+    assert client.connected
+    assert client._recv_rtcm_last_packet_timestamp == 15
+
+
+def test_request_rejects_header_injection():
+    client = make_client(host='caster\r\nInjected: yes')
+    with pytest.raises(ValueError):
+        client._form_request()

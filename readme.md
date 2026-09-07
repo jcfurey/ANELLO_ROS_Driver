@@ -1,494 +1,119 @@
-# ANELLO ROS2 Driver
+# ANELLO ROS 2 driver — 4.0.0
 
-[![CI](https://github.com/jcfurey/ANELLO_ROS_Driver/actions/workflows/ci.yml/badge.svg)](https://github.com/jcfurey/ANELLO_ROS_Driver/actions/workflows/ci.yml)
+ROS 2 component and standalone driver for ANELLO EVK, Ground INS, and Ground IMU devices, with UART/UDP transport and an optional NTRIP correction client. Device configuration and physical calibration remain the responsibility of the installation.
 
-ROS2 driver for [ANELLO Photonics](https://www.anellophotonics.com/) GNSS/INS devices.
+Version 4 changes navigation frames, validity handling, and covariance defaults. Read [the migration guide](doc/migration_v4.md) before updating an existing launch or fusion configuration.
 
-**New to ANELLO?** See the [Integration Guide](doc/integration_guide.md) for
-step-by-step instructions on wiring, configuring, and integrating the ANELLO
-EVK with your robotics platform (including `robot_localization` and Nav2).
-Using Ethernet as the primary link (recommended for robots)? Follow the
-[Ethernet Setup Guide](doc/ethernet_setup_guide.md) for mounting, unit
-configuration with the ANELLO user tool, and wiring into a ROS2 Jazzy stack.
-Either link uses the [ANELLO user tool](https://github.com/Anello-Photonics/user_tool)
-over USB to set the unit's output format, rate, and baud before first launch —
-the driver reads whatever the unit already streams, it does not configure it.
-Before trusting outputs from a new install or driver upgrade, run the
-[Hardware Validation Checklist](doc/hardware_validation_checklist.md).
+## Build and test
 
-## Supported Products
-
-| Product | Firmware | Baud Rate |
-|---------|----------|-----------|
-| ANELLO GNSS INS | >= v1.1.1 | 230400 (default) |
-| ANELLO EVK | >= v1.1.1 | 921600 |
-| ANELLO IMU+ | >= v1.1.1 | 230400 (default) |
-
-## Package Overview
-
-This repository contains three ROS2 packages:
-
-| Package | Description |
-|---------|-------------|
-| `anello_ros_driver` | C++ driver node that communicates with ANELLO hardware over UART or Ethernet |
-| `anello_interfaces` | Custom ROS2 message and service definitions |
-| `ntrip_client` | Python NTRIP client for receiving RTK corrections |
-
-## Installation
-
-### Prerequisites
-
-- A supported ROS2 distro - see the [ROS2 installation guide](https://docs.ros.org/en/rolling/Installation.html)
-- `rtcm_msgs` and `nmea_msgs` packages
-
-#### Supported ROS2 distros
-
-| Distro          | Status                                     |
-|-----------------|--------------------------------------------|
-| Humble          | Supported                                  |
-| Jazzy           | Supported (Ubuntu 24.04 / Python 3.12)     |
-| Lyrical/Kilted  | Build-verified; hardware testing pending   |
-
-### Build
+From the containing ROS workspace, with the desired ROS distribution sourced:
 
 ```bash
-# Clone into your workspace
-cd ~/ros2_ws/src
-git clone https://github.com/Anello-Photonics/ANELLO_ROS_Driver.git
-
-# Install dependencies
-cd ~/ros2_ws
-rosdep install --from-paths src --ignore-src -r -y
-
-# Build
-colcon build --packages-select anello_interfaces anello_ros_driver ntrip_client
-
-# Source the workspace
+rosdep install --from-paths src/ANELLO_ROS_Driver --ignore-src -r -y
+colcon build --packages-up-to anello_ros_driver ntrip_client
 source install/setup.bash
-```
-
-## Quick Start
-
-### Launch with Defaults (UART, auto-detect ports)
-
-```bash
-ros2 launch anello_ros_driver anello_driver.launch.py
-```
-
-### Launch with Custom Parameters
-
-```bash
-ros2 launch anello_ros_driver anello_driver.launch.py \
-  com_type:=UART \
-  baud_rate:=921600 \
-  uart_data_port:=/dev/ttyUSB0 \
-  uart_config_port:=/dev/ttyUSB3
-```
-
-### Launch with Ethernet
-
-```bash
-ros2 launch anello_ros_driver anello_driver.launch.py \
-  com_type:=ETH \
-  remote_ip:=192.168.1.111
-```
-
-### Launch with NTRIP Corrections
-
-```bash
-ros2 launch anello_ros_driver anello_driver.launch.py \
-  ntrip_host:=caster.example.com \
-  ntrip_port:=2101 \
-  ntrip_mountpoint:=MOUNTPOINT \
-  ntrip_authenticate:=true \
-  ntrip_username:=user \
-  ntrip_password:=pass
-```
-
-## Configuration
-
-### Driver Parameters
-
-All parameters can be set via the launch file or on the command line at
-startup. They are declared **read-only**: the driver reads each one once
-during initialization, so a runtime `ros2 param set` is rejected with
-"parameter is read-only" instead of silently having no effect — restart
-the node to change a value.
-
-#### Communication
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `com_type` | `UART` | Communication type: `UART` or `ETH` |
-| `uart_data_port` | `AUTO` | UART data port path, or `AUTO` for auto-detection. For a fixed path prefer a `/dev/serial/by-id/` symlink — it survives USB re-enumeration after a unit power-cycle |
-| `uart_config_port` | `AUTO` | UART config port path, `AUTO`, or `OFF` to disable |
-
-In UART mode the data port self-heals across a unit power-cycle: a tty
-hangup (USB re-enumeration) or a few seconds of sustained silence on a
-previously confirmed port restarts the `AUTO` scan — re-listing
-`/dev/ttyUSB*` each step, since the unit usually returns under a new
-name — or, for a fixed path, periodically reopens it until the device
-answers. The loss and the recovery are both logged at WARN. The config
-port (`anello/send_cmd`) does not yet reconnect; a node restart is still
-required to restore command service after a power-cycle.
-| `baud_rate` | `230400` | Serial baud rate (`115200`, `230400`, `460800`, `921600`). The EVK ships at `921600`; the Ground INS/IMU default is `230400` — see [doc/anello_evk_reference.md](doc/anello_evk_reference.md) |
-| `remote_ip` | `192.168.1.111` | Device IP address (ethernet mode). For full Ethernet setup — unit configuration with the ANELLO user tool, host networking, port mapping — see the [Ethernet Setup Guide](doc/ethernet_setup_guide.md) |
-| `local_data_port` | `1111` | Local UDP data port (ethernet mode) |
-| `local_config_port` | `2222` | Local UDP config port (ethernet mode) |
-| `local_odometer_port` | `3333` | Local UDP odometer port (ethernet mode) |
-
-#### Frame IDs
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `frame_id.imu` | `imu_link` | Frame ID for IMU messages |
-| `frame_id.ins` | `ins_link` | Frame ID for INS messages |
-| `frame_id.gnss` | `gnss_link` | Frame ID for GNSS messages |
-| `frame_id.hdg` | `gnss_link` | Frame ID for dual-antenna heading messages |
-
-#### TF Broadcasting
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `publish_tf` | `true` | Publish the `tf_parent_frame` → `tf_child_frame` transform |
-| `tf_parent_frame` | `odom` | Parent frame for TF broadcast |
-| `tf_child_frame` | `base_link` | Child frame for the TF broadcast and `/odom` `child_frame_id`. REP-105 makes the moving `odom` child `base_link` (with `ins_link`/`imu_link` as static URDF children); set `ins_link` for the legacy `odom → ins_link` behavior when no URDF parents `ins_link` |
-
-#### Polling
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `poll_interval_ms` | `5` | Main loop polling interval in milliseconds (clamped to ≥ 1: a 0 ms timer would busy-spin the executor) |
-
-#### Timestamping
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `timestamp_source` | `mcu` | `mcu` (default) = device MCU time translated to host time with a minimum-offset filter (Olson, IROS 2010): inter-message timing follows the device clock instead of carrying serial/OS arrival jitter (sub-ms typical, multi-ms outliers), and it warms up on arrival stamps first. `arrival` = host time captured once per port read and shared by every message in that read. The translated `mcu` stamps keep a small constant offset (≈ the minimum link latency); the raw `mcu_time`/`gps_time` fields remain in every `anello/*` message for offline use |
-
-Timestamping tips: at 230400 baud a full message spends 4–5 ms on the
-wire — prefer 921600 baud or UDP when stamp latency matters. With FTDI
-USB-serial adapters, lower the adapter's `latency_timer` from its 16 ms
-default (`/sys/bus/usb-serial/devices/*/latency_timer`) to 1 ms.
-
-#### Health Monitoring
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `heading_baseline` | `0.0` | Dual-antenna baseline length in meters, used to validate APHDG heading in the health monitor. When left at `0.0` the driver queries the device (`APVEH,R,bsl`) once at startup; if that also fails, the baseline check is skipped |
-
-#### Standard IMU Output (REP-145)
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `use_fog_wz` | `true` | Use the optical gyro (`OG_WZ`) for the z angular rate in `imu/data` and `imu/data_raw` instead of the MEMS `WZ`. Set `false` if the FOG is disabled on the unit (`APCFG fog off`) |
-| `flip_accel_sign` | `false` | Negate all `linear_acceleration` axes in `imu/data`/`imu/data_raw`. The device's at-rest accelerometer sign convention is not in the public manual — verify on the bench: stationary `linear_acceleration.z` must read **+9.8**; if it reads −9.8, set this `true` (see the [integration guide](doc/integration_guide.md)). The driver also self-checks at startup: a stationary, level unit publishing inverted gravity triggers a one-time warning naming the value to set |
-| `covariance.angular_velocity` | `[7.6e-7, 7.6e-7, 2.1e-8]` | Diagonal angular velocity covariance `[x, y, z]` in (rad/s)². Defaults derived from the ANELLO datasheet ARW specs at 100 Hz (MEMS X/Y: 0.3°/√hr; optical Z: 0.05°/√hr) |
-| `covariance.linear_acceleration` | `[2.5e-5, 2.5e-5, 2.5e-5]` | Diagonal linear acceleration covariance `[x, y, z]` in (m/s²)². Default derived from the 0.03 m/s/√hr VRW spec at 100 Hz |
-
-The defaults follow the standard white-noise model (per-sample variance =
-noise-density² × sample rate) at 100 Hz ODR; they scale linearly with ODR,
-so double them at 200 Hz or halve at 50 Hz. Datasheet noise densities are
-not conservative across all timescales (bias instability and temperature
-drift are excluded) — for tight fusion tuning, characterize the actual unit
-with an Allan-variance run (e.g. `allan_variance_ros`) and override these
-parameters.
-
-### NTRIP Client Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `ntrip_host` | (empty) | NTRIP caster hostname |
-| `ntrip_port` | `2101` | NTRIP caster port |
-| `ntrip_mountpoint` | (empty) | NTRIP mountpoint name |
-| `ntrip_authenticate` | `false` | Enable NTRIP authentication |
-| `ntrip_username` | (empty) | NTRIP username |
-| `ntrip_password` | (empty) | NTRIP password |
-
-Additional NTRIP parameters (`ssl`, `cert`, `key`, `ca_cert`, `reconnect_attempt_max`, `reconnect_attempt_wait_seconds`, `rtcm_timeout_seconds`, `ntrip_version`, `nmea_min_interval_seconds`) can be passed directly to the `ntrip_client` node.
-
-The client speaks NTRIP rev1 by default. Set `ntrip_version` to `Ntrip/2.0`
-for rev2 casters: the request is then sent as HTTP/1.1 with the required
-`Host` and `Ntrip-Version` headers, and chunked transfer encoding is
-decoded automatically. GGA sentences forwarded to the caster are
-rate-limited to one per `nmea_min_interval_seconds` (default 10 s, `0`
-disables the throttle), per standard NTRIP caster practice (5–60 s).
-
-## Topics
-
-### Published Topics
-
-#### ANELLO Custom Messages
-
-All custom messages include a `std_msgs/Header` with timestamp and frame ID. Message definitions are in `anello_interfaces/msg/`.
-
-| Topic | Type | Description |
-|-------|------|-------------|
-| `anello/imu_raw` | `anello_interfaces/APIMU` | Raw IMU data (accel, gyro, FOG gyro, odometer, temp) |
-| `anello/im1` | `anello_interfaces/APIM1` | IMU data without odometer (with sync time) |
-| `anello/ins` | `anello_interfaces/APINS` | INS solution (position, velocity, attitude, status) |
-| `anello/gps` | `anello_interfaces/APGPS` | Primary GNSS receiver (position, velocity, accuracy, RTK status) |
-| `anello/gps2` | `anello_interfaces/APGPS` | Secondary GNSS receiver |
-| `anello/hdg` | `anello_interfaces/APHDG` | Dual-antenna heading and baseline |
-| `anello/cov` | `anello_interfaces/APCOV` | Covariance matrices (position, velocity, attitude) |
-| `anello/health` | `anello_interfaces/APHEALTH` | Device health status (1 Hz **while data is flowing** — nothing is published before the first decoded message or while the device is silent; `/diagnostics` carries the no-data ERROR state). QoS: reliable + transient_local, depth 1, so a late-joining monitor immediately latches the last state |
-
-#### Standard ROS2 Messages
-
-| Topic | Type | Description |
-|-------|------|-------------|
-| `imu/data_raw` | `sensor_msgs/Imu` | Accelerometer + gyroscope at the sensor rate (every APIMU/APIM1), no orientation (`orientation_covariance[0] = -1` per REP-145) |
-| `imu/data` | `sensor_msgs/Imu` | Same as `imu/data_raw` plus the INS orientation quaternion, published at the INS rate |
-| `gps/fix` | `sensor_msgs/NavSatFix` | Raw GNSS fix from APGPS (4 Hz), covariance approximated from the receiver accuracy estimates. Feed this (not `ins/fix`) to `navsat_transform_node` — fusing the INS position back in would double-count the IMU |
-| `ins/fix` | `sensor_msgs/NavSatFix` | INS-fused position at the INS rate, with the full EKF covariance from APCOV when available |
-| `odom` | `nav_msgs/Odometry` | INS solution at the INS rate: pose in a local ENU frame anchored at the first valid fix (frame `tf_parent_frame` → `tf_child_frame`), twist in the body (FLU) frame. Pose covariance from APCOV position/orientation; twist linear covariance from the APCOV velocity covariance rotated into the body frame; angular covariance from the `covariance.angular_velocity` parameter |
-| `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA sentence forwarded to NTRIP caster |
-
-**Frame conventions:** the `anello/*` custom topics carry values in the
-device-native convention (NED attitude with heading clockwise from north,
-FRD body axes), exactly as reported by the unit. The standard interfaces —
-`imu/data`, `gps/fix`, and the TF broadcast — are converted by the driver
-to REP-103 (ENU orientation, FLU body axes), so they can be consumed
-directly by tools like `robot_localization` and Nav2.
-
-#### TF Transforms
-
-| Parent | Child | Description |
-|--------|-------|-------------|
-| `odom` (`tf_parent_frame`) | `base_link` (`tf_child_frame`) | INS pose: local-ENU translation anchored at the first valid fix (same as `/odom`) plus the ENU/FLU orientation from roll/pitch/heading |
-
-#### Diagnostics
-
-The driver publishes to `/diagnostics` via `diagnostic_updater` with:
-- Position accuracy status (cm / m / >1m)
-- Heading stability (stable / unstable)
-- Gyro health (good / bad)
-- Decoded message rate and error rate over a 5 s sliding window (a
-  device that stops streaming raises ERROR instead of reporting the
-  last known health flags)
-- Lifetime message / checksum-failure / parse-failure counters
-- Active port names
-
-### Subscribed Topics
-
-| Topic | Type | Description |
-|-------|------|-------------|
-| `anello/odo` | `anello_interfaces/APODO` | Odometer speed input to the ANELLO device |
-| `ntrip_client/rtcm` | `rtcm_msgs/Message` | RTCM correction data from NTRIP client. QoS: **reliable**, depth 10 (matched by the bundled NTRIP node) — an external RTCM source publishing best-effort will not connect |
-
-### Services
-
-| Service | Type | Description |
-|---------|------|-------------|
-| `anello/send_cmd` | `anello_interfaces/CmdAndRsp` | Send an ASCII command to the device and receive the response |
-
-**Example:**
-
-```bash
-# Ping the device
-ros2 service call /anello/send_cmd anello_interfaces/srv/CmdAndRsp "{command: 'APPNG'}"
-
-# Read baseline configuration
-ros2 service call /anello/send_cmd anello_interfaces/srv/CmdAndRsp "{command: 'APVEH,R,bsl'}"
-```
-
-## Message Definitions
-
-### APIMU
-
-| Field | Type | Unit | Description |
-|-------|------|------|-------------|
-| `header` | `Header` | | Timestamp and frame ID |
-| `mcu_time` | `float64` | ms | MCU time since power-on |
-| `ax`, `ay`, `az` | `float64` | g | Linear acceleration |
-| `wx`, `wy`, `wz` | `float64` | deg/s | Angular rate (MEMS) |
-| `wz_fog` | `float64` | deg/s | High-precision z-axis angular rate (optical) |
-| `odometer_speed` | `float64` | m/s | Odometer speed |
-| `odometer_time` | `float64` | s | Odometer timestamp (seconds, unlike `mcu_time`) |
-| `temp` | `float64` | C | Temperature |
-
-### APINS
-
-| Field | Type | Unit | Description |
-|-------|------|------|-------------|
-| `header` | `Header` | | Timestamp and frame ID |
-| `mcu_time` | `float64` | ms | MCU time |
-| `gps_time` | `float64` | ns | GPS time (GTOW) |
-| `ins_status` | `uint8` | | 0=Att only, 1=Pos+Att, 2=Pos+Hdg+Att, 3=RTK Float, 4=RTK Fix |
-| `lat`, `lon` | `float64` | deg | Latitude, longitude |
-| `alt_ellipsoid` | `float64` | m | Altitude (ellipsoid) |
-| `vn`, `ve`, `vd` | `float64` | m/s | NED velocity |
-| `roll`, `pitch`, `heading` | `float64` | deg | Attitude |
-| `zupt` | `uint8` | | 1=stationary, 0=moving |
-
-### APGPS
-
-| Field | Type | Unit | Description |
-|-------|------|------|-------------|
-| `header` | `Header` | | Timestamp and frame ID |
-| `mcu_time` | `float64` | ms | MCU time |
-| `gps_time` | `float64` | ns | GPS time |
-| `lat`, `lon` | `float64` | deg | Position |
-| `alt_ellipsoid`, `alt_msl` | `float64` | m | Altitude |
-| `speed` | `float64` | m/s | Ground speed |
-| `heading` | `float64` | deg | Heading |
-| `hacc`, `vacc` | `float64` | m | Horizontal/vertical accuracy |
-| `pdop` | `float64` | | Position dilution of precision |
-| `fix_type` | `uint8` | | 0=No Fix, 2=2D, 3=3D, 5=Time only |
-| `sat_num` | `uint8` | | Number of satellites |
-| `speed_accuracy` | `float64` | m/s | Speed accuracy |
-| `heading_accuracy` | `float64` | deg | Heading accuracy |
-| `rtk_fix_status` | `uint8` | | 0=SPP, 1=RTK Float, 2=RTK Fix |
-
-### APHEALTH
-
-| Field | Type | Values |
-|-------|------|--------|
-| `header` | `Header` | Timestamp |
-| `position_acc_flag` | `uint8` | 0=cm-level, 1=m-level, 2=>1m |
-| `heading_health_flag` | `uint8` | 0=stable, 1=unstable |
-| `gyro_health_flag` | `uint8` | 0=good, 1=bad |
-
-Full message definitions for `APIM1`, `APHDG`, `APCOV`, and `APODO` can be found in `anello_interfaces/msg/`.
-
-## Node Composition
-
-The driver is built as a composable node and can be loaded into a component
-container. Use the **multithreaded** container: the standalone executable
-runs a `MultiThreadedExecutor` so the config-port callback group (the
-`send_cmd` service and `anello/odo` input, which can block ~500 ms on the
-device) cannot stall the data path — a single-threaded container loses
-that isolation.
-
-```bash
-ros2 run rclcpp_components component_container_mt
-```
-
-```bash
-ros2 component load /ComponentManager anello_ros_driver anello::AnelloRosDriver \
-  -p com_type:=UART -p baud_rate:=230400
-```
-
-## Using with Your Code
-
-### C++
-
-```cpp
-#include "anello_interfaces/msg/apins.hpp"
-#include "sensor_msgs/msg/imu.hpp"
-
-// Subscribe to the standard IMU message
-auto sub = node->create_subscription<sensor_msgs::msg::Imu>(
-    "imu/data", rclcpp::SensorDataQoS(),
-    [](sensor_msgs::msg::Imu::SharedPtr msg) {
-        // Use msg->orientation, msg->angular_velocity, msg->linear_acceleration
-    });
-
-// Or subscribe to the ANELLO-specific INS message
-auto sub2 = node->create_subscription<anello_interfaces::msg::APINS>(
-    "anello/ins", rclcpp::SensorDataQoS(),
-    [](anello_interfaces::msg::APINS::SharedPtr msg) {
-        // Use msg->lat, msg->lon, msg->heading, etc.
-    });
-```
-
-### Python
-
-```python
-from sensor_msgs.msg import Imu, NavSatFix
-from anello_interfaces.msg import APINS
-from rclpy.qos import qos_profile_sensor_data
-
-# The driver publishes the sensor streams with SensorDataQoS (best effort).
-# A subscription must also be best effort or it will silently never connect
-# — a plain depth (e.g. 10) is RELIABLE and will not match these publishers.
-self.create_subscription(Imu, 'imu/data', self.imu_callback,
-                         qos_profile_sensor_data)
-self.create_subscription(NavSatFix, 'gps/fix', self.gps_callback,
-                         qos_profile_sensor_data)
-
-# ANELLO-specific sensor streams are also SensorDataQoS (exception:
-# anello/health is reliable + transient_local)
-self.create_subscription(APINS, 'anello/ins', self.ins_callback,
-                         qos_profile_sensor_data)
-```
-
-## Testing
-
-```bash
-cd ~/ros2_ws
-colcon test --packages-select anello_interfaces anello_ros_driver ntrip_client
+colcon test --packages-select anello_interfaces anello_ros_driver ntrip_client \
+  --python-testing pytest --return-code-on-test-failure
 colcon test-result --verbose
+python3 src/ANELLO_ROS_Driver/tools/check_test_results.py build
 ```
 
-This runs `ament_lint_auto` (cppcheck, flake8, pep257, xmllint) and any additional tests. Copyright and formatting-only linters (copyright, cpplint, uncrustify) are skipped: the codebase predates them and a bulk reformat would obscure history.
+The CI matrix covers Humble, Jazzy, Kilted, and Lyrical. The September 2026 remediation was built and exercised locally on **Lyrical**; other distributions require their CI results before being called validated. The service API uses the Humble QoS profile overload where needed.
 
-## Architecture
+The suites cover full ASCII/RTCM frames, numerical conversion, covariance and coordinate math, clock resets, pseudo-terminal reconnection/backpressure, simulated casters, and the installed driver/launch files on localhost. They do not establish physical sensor accuracy. `colcon.pkg` selects pytest for the Python package when `colcon-metadata` is installed; the explicit flag above also works without that extension. CI checks for missing or empty result files. An ament cppcheck run that skips checks is not static-analysis coverage.
 
-```
-                    ANELLO Device (GNSS INS / EVK / IMU+)
-                         |                    |
-                    UART / Ethernet      UART / Ethernet
-                    (Data Port)          (Config Port)
-                         |                    |
-              +----------+--------------------+----------+
-              |          anello_ros_driver (C++)          |
-              |                                          |
-              |  Communication Layer                     |
-              |    serial_interface / ethernet_interface  |
-              |    anello_data_port / anello_config_port  |
-              |                                          |
-              |  Decoding Layer                          |
-              |    ASCII decoder (#AP messages)           |
-              |    RTCM decoder (binary type 4058)        |
-              |                                          |
-              |  Publishing Layer                        |
-              |    Custom ANELLO messages (anello/*)      |
-              |    Standard messages (imu/data, gps/fix)  |
-              |    TF2 transforms                        |
-              |    Diagnostics                           |
-              +------------------------------------------+
-                         |                    ^
-                    ROS2 DDS               ROS2 DDS
-                         |                    |
-              +----------+--------------------+----------+
-              |          ntrip_client (Python)            |
-              |                                          |
-              |  NTRIP caster <-> RTCM corrections       |
-              |  ntrip_client/nmea (GGA) -> caster       |
-              |  caster -> ntrip_client/rtcm -> driver   |
-              +------------------------------------------+
+## Launch
+
+```bash
+# Stable symlinks are preferred; AUTO scans ttyUSB* candidates.
+ros2 launch anello_ros_driver anello_driver.launch.py \
+  uart_data_port:=/dev/serial/by-id/DEVICE_DATA \
+  uart_config_port:=/dev/serial/by-id/DEVICE_CONFIG
+
+# EVK factory baud rate
+ros2 launch anello_ros_driver anello_driver.launch.py baud_rate:=921600
+
+# Ethernet: host ports must agree with the device configuration.
+ros2 launch anello_ros_driver anello_driver.launch.py com_type:=ETH \
+  remote_ip:=192.168.1.111 local_data_port:=1111 \
+  local_config_port:=2222 local_odometer_port:=3333
+
+# All startup parameters can be supplied in a normal ROS parameter file.
+ros2 launch anello_ros_driver anello_driver.launch.py params_file:=/absolute/path/anello.yaml
 ```
 
-## Further Reading
+Unspecified launch arguments preserve the parameter file or node default. Launch arguments for dotted parameters replace `.` with `_`, for example `frame_id_imu` and `covariance_angular_velocity`. String arguments including `OFF` and numeric credentials keep their string type. The legacy XML entry point includes the Python implementation and accepts the former `host`, `username`, `ssl`, and related NTRIP aliases.
 
-- [Integration Guide](doc/integration_guide.md) - Hardware setup, URDF, robot_localization, Nav2, NTRIP, odometer input, troubleshooting
-- [ANELLO Developer Manual](https://docs-a1.readthedocs.io/en/latest/) - Firmware documentation, ASCII/RTCM protocol reference
+Both UART channels recover after a device replacement. Config `OFF` stays disabled. AUTO configuration probing runs incrementally; startup does not wait for a device. A command sent while the channel is unavailable returns an error, and odometer/correction transmission failures appear in diagnostics. The standalone executable uses a multithreaded executor. Use `component_container_mt` when loading `anello::AnelloRosDriver` so bounded command/transmit waits cannot hold the receive callback.
 
-## License
+## Standard interfaces
 
-MIT License
+Data and command topic names are relative to the node namespace. Diagnostics and TF use the usual global ROS topics. Sensor publishers use `SensorDataQoS` (best effort, depth 5). RTCM input/output is reliable with depth 10; health is reliable and transient local with depth 1.
 
-Copyright (c) 2023 ANELLO Photonics
+| Topic | Type | Contract |
+|---|---|---|
+| `imu/data_raw` | `sensor_msgs/Imu` | APIMU/APIM1 acceleration and selected gyro, SI units, FLU axes; orientation unavailable |
+| `imu/data` | `sensor_msgs/Imu` | APINS attitude in current geodetic ENU; body fields included only when fresh and in the same declared frame |
+| `gps/fix` | `sensor_msgs/NavSatFix` | Primary GNSS receiver solution; 2D height is NaN; accuracy-derived covariance is approximated |
+| `ins/fix` | `sensor_msgs/NavSatFix` | Fused INS position; no-fix status and NaN coordinates when position is unavailable |
+| `ins/odometry` | `nav_msgs/Odometry` | Globally corrected INS solution: ECEF-derived local ENU pose, body-frame twist; emitted only with valid position |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Stream ages, health, framing errors, transport failures, clock resets; status names identify the node namespace |
+| `ntrip_client/rtcm` | `rtcm_msgs/Message` | Checksum-verified corrections sent to the device data channel |
+| `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA generated from primary GNSS for the caster |
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Device-native topics are `anello/{imu_raw,im1,ins,gps,gps2,hdg,cov,ahrs,health}` using the matching `anello_interfaces` message definitions. Units remain documented in those messages: acceleration in g, rates and angles in degrees, MCU time in milliseconds; APIMU odometer time is seconds. IMU/INS/covariance/AHRS native frame identifiers have `_frd` appended to distinguish them from converted FLU output. They are not substitutes for standard ROS sensor messages. GPS2 identifies the secondary antenna separately.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+APAHRS/subtype 8 is supported on `anello/ahrs`. Its yaw can be relative; it is not automatically presented as a north-referenced `imu/data` orientation. Legacy APIMU/APIM1 ASCII layouts without synchronization time remain supported. RTCM APIMU supports both old and current layouts; other binary layouts must match the documented structure exactly. Unknown extensions are rejected and counted.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+## Principal startup parameters
 
-## Author Information
+Parameters are read-only while running; restart to change them.
 
-This driver was created by [ANELLO Photonics](https://www.anellophotonics.com/).
+| Parameter | Default | Meaning |
+|---|---|---|
+| `com_type` | `UART` | `UART` or `ETH` |
+| `uart_data_port`, `uart_config_port` | `AUTO` | Serial path or discovery; config also accepts `OFF` |
+| `baud_rate` | `230400` | 115200, 230400, 460800, or 921600 |
+| `remote_ip` | `192.168.1.111` | Device IPv4 address |
+| `local_data_port`, `local_config_port`, `local_odometer_port` | 1111, 2222, 3333 | Host UDP ports; device destination ports are 1, 2, 3 |
+| `frame_id.imu`, `frame_id.ins` | `ins_link` | Actual output origins/axes; see the integration contract |
+| `frame_id.gnss`, `frame_id.gnss2`, `frame_id.hdg` | `gnss_link`, `gnss2_link`, `gnss_link` | Antenna/heading reference frames |
+| `publish_tf` | `false` | Optional standalone INS transform |
+| `tf_parent_frame`, `tf_child_frame` | `anello_local`, `ins_link` | Global local-Cartesian frame and firmware output frame; child must equal `frame_id.ins` |
+| `poll_interval_ms` | 5 | Nonblocking read cadence, up to 16 buffers per callback |
+| `timestamp_source` | `mcu` | Device-to-host translation after 100 valid samples; `arrival` uses read time |
+| `use_fog_wz`, `flip_accel_sign` | `true`, `false` | Select optical Z gyro; optionally invert all acceleration axes |
+| `imu_max_age`, `covariance.max_age` | 0.05, 0.2 s | Maximum acquisition-time separation and steady-clock cache age |
+| `covariance.device_convention` | `unknown` | Enable `verified_m2_deg2_euler` only after obtaining the firmware contract |
+| `covariance.unknown_variance` | 1e6 | Conservative odometry diagonal fallback when uncertainty/fields are unavailable |
+| `covariance.angular_velocity`, `covariance.linear_acceleration` | `[]` | Three nonnegative finite SI variances; empty selects automatic estimates |
+| `imu_output_rate_hz` | 100 | Scales automatic estimates; does not configure device output rate |
+| `expected_streams` | `[imu, ins, gps]` | Streams required for healthy diagnostics; Ground IMU normally uses `[imu]` |
+| `stream_timeout` | 2 s | Maximum silence for each expected stream |
+| `heading_baseline` | 0 m | Measured dual-antenna separation; zero skips baseline comparison |
+| `gps_utc_leap_seconds` | 18 | GPS minus UTC seconds for GGA; update from IERS announcements |
+| `gnss_service_mask` | 0 | Configured constellation mask; zero means unspecified |
+| `accel_sign_check_upright` | `false` | Opt-in startup gravity check for a known upright installation |
+| `publish_custom_messages` | `true` | Publish the device-native topics |
+
+At 100 Hz, automatic angular variances are `[7.6e-7, 7.6e-7, 2.1e-8]` with FOG, or `[7.6e-7, 7.6e-7, 7.6e-7]` with MEMS. Acceleration variances are `[2.5e-5, 2.5e-5, 2.5e-5]`. These are noise estimates, not calibrated accuracy claims; filtering and bandwidth affect them. Explicit arrays override rate scaling. Zero IMU covariance means unknown; odometry uses the configured conservative fallback instead of interpreting zero as unknown.
+
+## NTRIP and commands
+
+```bash
+ros2 launch anello_ros_driver anello_driver.launch.py \
+  ntrip_host:=caster.example.org ntrip_port:=2101 ntrip_mountpoint:=MOUNT \
+  ntrip_authenticate:=true ntrip_username:=USER ntrip_password:=PASSWORD \
+  ntrip_version:=Ntrip/2.0 ntrip_ssl:=true
+
+ros2 service call /anello/send_cmd anello_interfaces/srv/CmdAndRsp "{command: 'APPNG'}"
+ros2 topic pub -r 10 /anello/odo anello_interfaces/msg/APODO '{odo_speed: 1.25}'
+```
+
+For credentials, prefer a protected ROS parameter file supplied via `ntrip_params_file`, with `ntrip_enable:=true`. All NTRIP node parameters below have launch overrides prefixed `ntrip_`, except `ntrip_version` itself: `host`, `port`, `mountpoint`, `authenticate`, `username`, `password`, `ssl`, `cert`, `key`, `ca_cert`, `rtcm_frame_id`, `reconnect_attempt_wait_seconds`, `rtcm_timeout_seconds`, `nmea_min_interval_seconds`, and `nmea_max_age_seconds`.
+
+NTRIP starts even when the caster is unavailable and retries indefinitely. Default retry delay is 5 s; the first/next valid-correction deadline is 4 s. GGA sending defaults to every 10 s and stops when the last valid sentence is older than 30 s. Network I/O runs outside ROS callbacks with bounded correction buffering; expired queued corrections are discarded. NTRIP diagnostics report connection state, valid-frame age, and queue drops/expiry. The deprecated `reconnect_attempt_max` parameter is accepted for compatibility but no longer stops retries. HTTP/1.0, HTTP/1.1, ICY, TLS certificate validation, and bounded chunk decoding are supported.
+
+Commands accept a body such as `APVEH,R,bsl`; the driver adds framing/checksum and returns a checksum-verified reply with the matching message identifier (or APERR). There is a bounded 500 ms response wait. Concurrent identical unsolicited responses cannot be correlated more precisely because the protocol has no transaction ID. `InitHeading`/`UpdHeading` interfaces remain for source compatibility but have no advertised service; use documented device commands through `send_cmd`.
+
+See [integration](doc/integration_guide.md), [hardware validation](doc/hardware_validation_checklist.md), [Ethernet setup](doc/ethernet_setup_guide.md), and [the EVK reference](doc/anello_evk_reference.md).

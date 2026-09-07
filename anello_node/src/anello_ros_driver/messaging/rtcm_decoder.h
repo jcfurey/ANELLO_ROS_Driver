@@ -13,7 +13,7 @@
 #ifndef RTCM_DECODER_H
 #define RTCM_DECODER_H
 
-#include "../main_anello_ros_driver.h"
+#include "../protocol_types.h"
 
 enum RECEIVER_ID
 {

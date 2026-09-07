@@ -6,33 +6,26 @@
 
 #include <cstring>
 
-#include "../src/anello_ros_driver/bit_tools.h"
-#include "../src/anello_ros_driver/messaging/ascii_decoder.h"
-
-namespace
-{
-// Parse a writable copy of the sentence and return the field count.
-int fields_from(const char *sentence, char *buf, size_t buf_len, char **val)
-{
-    snprintf(buf, buf_len, "%s", sentence);
-    return parse_fields(buf, val);
+#include "../src/anello_ros_driver/messaging/protocol_decoder.h"
+namespace {
+anello::DecodedPacket decode_sentence(const std::string &sample) {
+    const auto body=sample.substr(1,sample.find('*')-1);
+    const auto frame="#"+body+"*"+compute_checksum(body.data(),body.size());
+    anello::DecodedPacket packet{};
+    EXPECT_TRUE(anello::decode_ascii_frame(frame,packet));
+    return packet;
 }
-}  // namespace
+}
 
 TEST(DecodeAsciiGps, ManualExampleSentence)
 {
     // Example APGPS capture from the ANELLO driver sources
-    char buf[256];
-    char *val[MAXFIELD];
-    int n = fields_from(
+    const auto packet = decode_sentence(
         "#APGPS,318213.135,1343773580500184320,37.3988755,-121.9791327,"
         "-27.9650,1.9240,0.0110,0.0000,0.2380,0.3820,0.9700,3,29,0.0820,"
-        "180.0000,0*65\r",
-        buf, sizeof(buf), val);
-    ASSERT_GE(n, 17);
+        "180.0000,0*65\r");
 
-    double out[32] = {};
-    decode_ascii_gps(val, out);
+    const auto &out=packet.values;
 
     EXPECT_DOUBLE_EQ(out[0], 318213.135);       // MCU time ms
     EXPECT_DOUBLE_EQ(out[2], 37.3988755);       // lat
@@ -49,16 +42,11 @@ TEST(DecodeAsciiGps, ManualExampleSentence)
 TEST(DecodeAsciiImu, ModernFirmwareWithTSync)
 {
     // Time, T_Sync, AX..AZ, WX..WZ, OG_WZ, ODO, ODO_Time, Temp
-    char buf[256];
-    char *val[MAXFIELD];
-    int n = fields_from(
+    const auto packet = decode_sentence(
         "#APIMU,1000.5,500.25,0.0344,-0.0128,1.0077,-0.0817,0.0013,-0.0038,"
-        "0.0105,1.50,999.0,47.05*00\r",
-        buf, sizeof(buf), val);
-    ASSERT_EQ(n, 15);  // name + 12 data + checksum + remainder
+        "0.0105,1.50,999.0,47.05*00\r");
 
-    double out[32] = {};
-    decode_ascii_imu(val, n, out);
+    const auto &out=packet.values;
 
     EXPECT_DOUBLE_EQ(out[0], 1000.5);    // MCU time ms
     EXPECT_DOUBLE_EQ(out[11], 500.25);   // T_Sync ms
@@ -73,16 +61,11 @@ TEST(DecodeAsciiImu, ModernFirmwareWithTSync)
 
 TEST(DecodeAsciiImu, LegacyFirmwareWithoutTSync)
 {
-    char buf[256];
-    char *val[MAXFIELD];
-    int n = fields_from(
+    const auto packet = decode_sentence(
         "#APIMU,1000.5,0.0344,-0.0128,1.0077,-0.0817,0.0013,-0.0038,"
-        "0.0105,1.50,999.0,47.05*00\r",
-        buf, sizeof(buf), val);
-    ASSERT_EQ(n, 14);
+        "0.0105,1.50,999.0,47.05*00\r");
 
-    double out[32] = {};
-    decode_ascii_imu(val, n, out);
+    const auto &out=packet.values;
 
     EXPECT_DOUBLE_EQ(out[0], 1000.5);
     EXPECT_DOUBLE_EQ(out[11], 0.0);     // no T_Sync on old firmware
@@ -92,16 +75,11 @@ TEST(DecodeAsciiImu, LegacyFirmwareWithoutTSync)
 
 TEST(DecodeAsciiIm1, ModernFirmwareWithTSync)
 {
-    char buf[256];
-    char *val[MAXFIELD];
-    int n = fields_from(
+    const auto packet = decode_sentence(
         "#APIM1,1000.5,500.25,0.0344,-0.0128,1.0077,-0.0817,0.0013,"
-        "-0.0038,0.0105,47.05*00\r",
-        buf, sizeof(buf), val);
-    ASSERT_EQ(n, 13);
+        "-0.0038,0.0105,47.05*00\r");
 
-    double out[32] = {};
-    decode_ascii_im1(val, n, out);
+    const auto &out=packet.values;
 
     EXPECT_DOUBLE_EQ(out[0], 1000.5);
     EXPECT_DOUBLE_EQ(out[9], 500.25);   // T_Sync
@@ -112,16 +90,11 @@ TEST(DecodeAsciiIm1, ModernFirmwareWithTSync)
 
 TEST(DecodeAsciiIm1, LegacyFirmwareWithoutTSync)
 {
-    char buf[256];
-    char *val[MAXFIELD];
-    int n = fields_from(
+    const auto packet = decode_sentence(
         "#APIM1,1000.5,0.0344,-0.0128,1.0077,-0.0817,0.0013,-0.0038,"
-        "0.0105,47.05*00\r",
-        buf, sizeof(buf), val);
-    ASSERT_EQ(n, 12);
+        "0.0105,47.05*00\r");
 
-    double out[32] = {};
-    decode_ascii_im1(val, n, out);
+    const auto &out=packet.values;
 
     EXPECT_DOUBLE_EQ(out[9], 0.0);      // T_Sync absent -> 0
     EXPECT_DOUBLE_EQ(out[1], 0.0344);   // ax must not shift
@@ -130,17 +103,12 @@ TEST(DecodeAsciiIm1, LegacyFirmwareWithoutTSync)
 
 TEST(DecodeAsciiIns, ManualExampleSentence)
 {
-    char buf[256];
-    char *val[MAXFIELD];
-    int n = fields_from(
+    const auto packet = decode_sentence(
         "#APINS,318215,1343773580502990592,1,37.398875500000,"
         "-121.979132700000,-27.965002059937,0.1,-0.2,0.3,"
-        "-0.166232,1.773182,0.250746,1*74\r",
-        buf, sizeof(buf), val);
-    ASSERT_GE(n, 14);
+        "-0.166232,1.773182,0.250746,1*74\r");
 
-    double out[32] = {};
-    decode_ascii_ins(val, out);
+    const auto &out=packet.values;
 
     EXPECT_DOUBLE_EQ(out[0], 318215.0);          // MCU time
     EXPECT_DOUBLE_EQ(out[2], 1.0);               // status
@@ -154,16 +122,11 @@ TEST(DecodeAsciiIns, ManualExampleSentence)
 
 TEST(DecodeAsciiHdg, FieldOrderAndFlags)
 {
-    char buf[256];
-    char *val[MAXFIELD];
-    int n = fields_from(
+    const auto packet = decode_sentence(
         "#APHDG,31527.383,1362269876750000128,2.13,1.60,3.23,4.19,"
-        "36.92845,0.2796,4.00156,303*59\r",
-        buf, sizeof(buf), val);
-    ASSERT_GE(n, 12);
+        "36.92845,0.2796,4.00156,303*59\r");
 
-    double out[32] = {};
-    decode_ascii_hdr(val, out);
+    const auto &out=packet.values;
 
     EXPECT_DOUBLE_EQ(out[2], 2.13);     // relPosN
     EXPECT_DOUBLE_EQ(out[5], 4.19);     // baseline length
@@ -173,19 +136,14 @@ TEST(DecodeAsciiHdg, FieldOrderAndFlags)
 
 TEST(DecodeAsciiCov, AllNineteenValues)
 {
-    char buf[512];
-    char *val[MAXFIELD];
-    // mcu_time then 18 covariance values 0.01 .. 0.18
-    int n = fields_from(
-        "#APCOV,1234.5,0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,"
-        "0.10,0.11,0.12,0.13,0.14,0.15,0.16,0.17,0.18*00\r",
-        buf, sizeof(buf), val);
-    ASSERT_GE(n, 20);
+    // Distinct values in a physically valid positive-semidefinite covariance.
+    const auto packet = decode_sentence(
+        "#APCOV,1234.5,1,2,3,0.04,0.05,0.06,7,8,9,"
+        "0.10,0.11,0.12,13,14,15,0.16,0.17,0.18*00\r");
 
-    double out[32] = {};
-    decode_ascii_cov(val, out);
+    const auto &out=packet.values;
 
     EXPECT_DOUBLE_EQ(out[0], 1234.5);
     for (int i = 1; i <= 18; ++i)
-        EXPECT_DOUBLE_EQ(out[i], i * 0.01) << "index " << i;
+        EXPECT_DOUBLE_EQ(out[i], (i%6>=1 && i%6<=3)?i:i*0.01) << "index " << i;
 }
