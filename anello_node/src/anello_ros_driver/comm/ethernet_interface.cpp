@@ -21,7 +21,7 @@
 #include <arpa/inet.h>
 #include <stdexcept>
 
-ethernet_interface::ethernet_interface(std::string remote_ip_address, int remote_port, int local_port)
+ethernet_interface::ethernet_interface(const std::string &remote_ip_address, int remote_port, int local_port)
 {
     this->remote_ip_address = remote_ip_address;
     this->local_port = local_port;

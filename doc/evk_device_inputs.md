@@ -43,3 +43,11 @@ ANELLO documents the data/config port roles, factory baud, odometer format, corr
 Monitor `device_input_rejections_total`, `device_input_rate_drops_total`, and `transmission_failures_total` in `/diagnostics`. Rejection/rate counters are lifetime totals; they distinguish rejected input from transport failures but do not prove firmware execution or acknowledgement. Existing decoded-stream ages and MCU/clock resets help distinguish a silent ROS connection from a device reboot, though reset detection also includes host-clock changes.
 
 Record firmware version, input rates, physical connection, power conditions, MCU uptime, and logs for a long run using valid corrections and odometer data. Link loss or a timed-out write can still truncate a physical transmission. Firmware must tolerate normal fragmentation/link loss; synthetic host tests cannot demonstrate that. Follow the [hardware checklist](hardware_validation_checklist.md) before asserting stability of the unit itself.
+
+## Host recovery and resource bounds
+
+The diagnostic rate/error history uses a fixed five-second window of fifty 100 ms buckets. Continuous malformed telemetry cannot allocate a timestamp for every error. Lifetime error counts remain available; recent rates expire with up to 100 ms of quantization. Directory iteration errors during AUTO configuration-port scans leave the port unconfirmed for a later retry.
+
+Clock helpers reject nonfinite updates and translations outside the signed nanosecond range. The node falls back to the captured arrival timestamp when a translation is unavailable. Overflow tests exercise helper boundaries beyond normal ROS clock values; separate live tests exercise the largest accepted MCU time and subsequent reboot. Invalid repeated numeric signs such as `+-1` are rejected at the ASCII decoder.
+
+The NTRIP client propagates DNS failures back to its retry loop, including resolver encoding errors and failure to start a resolver thread. Socket readiness uses `poll`, so a descriptor above 1023 does not cause perpetual reconnects. Shutdown owns socket cleanup across TCP/TLS setup and response parsing; a late successful status cannot restore a cancelled connection. These protections are tested with local sockets and simulated faults, not a physical EVK or production caster.

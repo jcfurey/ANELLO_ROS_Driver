@@ -41,8 +41,10 @@ void anello_config_port::poll() {
     if (name=="AUTO") {
         std::vector<std::string> ports;
         std::error_code error;
-        for (const auto &entry:std::filesystem::directory_iterator(directory_,error))
-            if (entry.path().filename().string().rfind(PORT_PREFIX,0)==0) ports.push_back(entry.path());
+        for (auto entry=std::filesystem::directory_iterator(directory_,error);
+             !error && entry!=std::filesystem::directory_iterator{}; entry.increment(error))
+            if (entry->path().filename().string().rfind(PORT_PREFIX,0)==0) ports.push_back(entry->path());
+        if (error) return;  // a directory can disappear or fail during a rescan
         std::sort(ports.rbegin(),ports.rend());
         if (ports.empty()) return;
         name=ports[scan_index_++%ports.size()];

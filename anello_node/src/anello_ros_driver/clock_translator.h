@@ -9,6 +9,7 @@
 #define CLOCK_TRANSLATOR_H
 #include <cstdint>
 #include <cmath>
+#include <optional>
 
 namespace anello
 {
@@ -18,22 +19,36 @@ namespace anello
  * only ever adds to arrival time, so the true clock offset is bounded
  * by the minimum observed (arrival - device) delta. Tracking that
  * minimum and letting it creep upward by a bounded drift rate gives
- * stamps whose dt follows the device clock, free of serial/OS jitter,
- * and provably never worse than arrival stamping. */
+ * stamps whose dt follows the device clock with reduced arrival jitter.
+ * Accuracy still depends on transport latency and oscillator behavior. */
 class ClockTranslator
 {
 public:
     void update_ns(double device_s, int64_t arrival_ns)
     {
+        if (!std::isfinite(device_s) || device_s<0) return;
         if (have_last_ && device_s+kResetThreshold<last_device_s_) reset();
         if (!epoch_valid_) { epoch_ns_=arrival_ns; epoch_valid_=true; }
-        update(device_s, static_cast<double>(arrival_ns-epoch_ns_)*1e-9);
+        // Subtract after widening: two valid signed timestamps can have
+        // a difference outside the int64 range after a clock step.
+        update(device_s, static_cast<double>(
+            (static_cast<long double>(arrival_ns)-epoch_ns_)*1e-9L));
     }
-    int64_t translate_ns(double device_s) const {
-        return epoch_ns_+static_cast<int64_t>(std::llround(translate(device_s)*1e9));
+    std::optional<int64_t> translate_ns(double device_s) const {
+        if (!epoch_valid_ || !std::isfinite(device_s) || device_s<0) return std::nullopt;
+        const long double relative=std::round(static_cast<long double>(translate(device_s))*1e9L);
+        const long double stamp=static_cast<long double>(epoch_ns_)+relative;
+        // Exclusive upper bound also works where long double == double:
+        // converting INT64_MAX to that type rounds it up to 2^63.
+        constexpr long double limit=9223372036854775808.0L;
+        if (!std::isfinite(stamp) || stamp < -limit || stamp >= limit) return std::nullopt;
+        return static_cast<int64_t>(stamp);
     }
     void update(double device_s, double arrival_s)
     {
+        if (!std::isfinite(device_s) || device_s<0 || !std::isfinite(arrival_s)) return;
+        const double offset = arrival_s - device_s;
+        if (!std::isfinite(offset)) return;
         if (have_last_ && device_s + kResetThreshold < last_device_s_)
         {
             reset();  // device time jumped far backwards: unit rebooted
@@ -56,7 +71,6 @@ public:
             last_device_s_ = device_s;
             have_last_ = true;
         }
-        const double offset = arrival_s - device_s;
         if (n_samples_ == 0 || offset < min_offset_)
         {
             min_offset_ = offset;

@@ -91,3 +91,5 @@ Software tests exercise deterministic frames, pseudo-terminals, local sockets, i
 The implementation targets Linux little-endian ROS platforms. The binary protocol uses packed little-endian device structures; unsupported host endianness fails compilation instead of publishing misdecoded values. CI is configured for Humble/Jazzy/Kilted/Lyrical; this workspace's actual local results are from Lyrical. No hardware configuration, external deployment, or firmware update is performed by this release.
 
 The [EVK device-input review](evk_device_inputs.md) explains the later outbound hardening. Its traffic and command limits are driver policy, not manufacturer-certified firmware limits.
+
+The same guide documents subsequent [host recovery and resource bounds](evk_device_inputs.md#host-recovery-and-resource-bounds): fixed diagnostic history, checked clock arithmetic, strict numeric signs, resilient directory scans, and NTRIP resolver/socket cancellation handling. These changes require no new parameters. Recent diagnostic rates now have 100 ms expiry granularity; lifetime totals retain their existing meaning.

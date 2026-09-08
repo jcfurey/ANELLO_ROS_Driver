@@ -54,7 +54,7 @@ class NTRIPClient:
             self._basic_credentials = None
 
         # Initialize this so we don't throw an exception when closing
-        self._raw_socket = None
+        self._socket_lock = threading.Lock()
         self._server_socket = None
 
         # Setup some parsers to parse incoming messages
@@ -119,17 +119,26 @@ class NTRIPClient:
         if self._shutdown:
             return False
 
+        try:
+            request = self._form_request()
+        except ValueError as exc:
+            self._logerr('Invalid NTRIP request: {}'.format(exc))
+            return False
+
         # Every failure path must go through disconnect(): it closes the
         # socket (no fd left to leak toward GC) and clears _connected —
         # a half-open session reported as connected would defeat the
         # ROS node's retry gate.
         if not self._open_socket():
             return False
+        sock = self._server_socket
+        if sock is None:
+            return False
 
         # Send the HTTP Request (sendall: a partial send() would
         # truncate the request and corrupt the caster session)
         try:
-            self._server_socket.sendall(self._form_request())
+            sock.sendall(request)
         except OSError as e:
             self._logerr(
                 'Unable to send request to server at '
@@ -143,16 +152,16 @@ class NTRIPClient:
             self.disconnect()
             return False
 
-        # Fresh connection: the RTCM-timeout gate must stay disarmed
-        # until this connection delivers its first packet (a stale
-        # pre-reconnect timestamp would otherwise tear the new
-        # connection down immediately if the reconnect took longer
-        # than rtcm_timeout_seconds), and the failure counters
-        # belong to the dead connection.
-        self._first_rtcm_received = False
-        self._recv_rtcm_last_packet_timestamp = time.monotonic()
-        self._read_zero_bytes_count = 0
-        self._nmea_send_failed_count = 0
+        # Arm a fresh first-correction deadline only after all headers pass.
+        # Shutdown must win if it raced with the last response read.
+        with self._socket_lock:
+            if self._shutdown or self._server_socket is not sock:
+                return False
+            self._first_rtcm_received = False
+            self._recv_rtcm_last_packet_timestamp = time.monotonic()
+            self._read_zero_bytes_count = 0
+            self._nmea_send_failed_count = 0
+            self._connected = True
         self._loginfo(
             'Connected to http://{}:{}/{}'.format(
                 self._host, self._port, self._mountpoint))
@@ -169,10 +178,17 @@ class NTRIPClient:
                 try:
                     result.put(socket.getaddrinfo(
                         self._host, self._port, type=socket.SOCK_STREAM))
-                except OSError as exc:
+                except Exception as exc:
+                    # Every completed thread must deliver a result, including
+                    # input/encoding errors that are not OSError. Otherwise
+                    # retries would wait forever on an abandoned empty queue.
                     result.put(exc)
 
-            threading.Thread(target=resolve, daemon=True).start()
+            try:
+                threading.Thread(target=resolve, daemon=True).start()
+            except Exception:
+                self._resolver_result = None
+                raise
         while not self._shutdown and time.monotonic() < deadline:
             try:
                 result = self._resolver_result.get(timeout=0.05)
@@ -192,7 +208,8 @@ class NTRIPClient:
                 if self._shutdown or time.monotonic() >= deadline:
                     return False
                 sock = socket.socket(family, kind, protocol)
-                self._server_socket = sock
+                if not self._adopt_socket(sock):
+                    return False
                 sock.settimeout(max(0.01, deadline - time.monotonic()))
                 try:
                     sock.connect(address)
@@ -202,11 +219,14 @@ class NTRIPClient:
                             context.load_cert_chain(self.cert, self.key)
                         if self.ca_cert:
                             context.load_verify_locations(self.ca_cert)
-                        self._raw_socket = sock
                         sock = context.wrap_socket(
                             sock, server_hostname=self._host,
                             do_handshake_on_connect=False)
-                        self._server_socket = sock
+                        # Wrapping transfers fd ownership. Cancellation in
+                        # that gap must close the replacement before a
+                        # blocking handshake starts.
+                        if not self._adopt_socket(sock):
+                            return False
                         sock.settimeout(max(0.01, deadline - time.monotonic()))
                         sock.do_handshake()
                     sock.settimeout(0.2)
@@ -217,7 +237,7 @@ class NTRIPClient:
                 except OSError:
                     self.disconnect()
             return False
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, OverflowError) as exc:
             self._logwarn('NTRIP connection failed: {}'.format(exc))
             self.disconnect()
             return False
@@ -226,6 +246,8 @@ class NTRIPClient:
         raw = b''
         deadline = time.monotonic() + 5.0
         sock = self._server_socket
+        if sock is None:
+            return None
         try:
             # Accumulate a complete status line, even a split "HT" prefix.
             while not self._shutdown and time.monotonic() < deadline:
@@ -277,35 +299,39 @@ class NTRIPClient:
                 code = value.strip().split(' ', 1)[0]
                 if code in ('401', '404'):
                     valid = False
-        self._connected = valid
         if not valid:
             self._logwarn('NTRIP response was not a successful stream status')
         return valid
 
+    def _adopt_socket(self, sock):
+        with self._socket_lock:
+            if not self._shutdown:
+                self._server_socket = sock
+                return True
+        self._close_socket(sock)
+        return False
+
     def disconnect(self):
-        # Disconnect the socket. Each socket gets its own shutdown and
-        # close attempt: a routine shutdown failure on one (e.g.
-        # ENOTCONN after the peer closed) must not skip the other.
-        self._connected = False
-        for sock in (self._server_socket, self._raw_socket):
-            if not sock:
-                continue
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except Exception as e:
-                self._logdebug(
-                    'Encountered exception when shutting down the '
-                    'socket. This can likely be ignored')
-                self._logdebug('Exception: {}'.format(e))
+        # Detach ownership before closing: concurrent shutdown and worker
+        # cleanup cannot close a socket twice or erase a replacement handle.
+        with self._socket_lock:
+            self._connected = False
+            sock = self._server_socket
+            self._server_socket = None
+        self._close_socket(sock)
+
+    def _close_socket(self, sock):
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError as exc:
+            self._logdebug('Socket shutdown: {}'.format(exc))
+        finally:
             try:
                 sock.close()
-            except Exception as e:
-                self._logdebug(
-                    'Encountered exception when closing the socket. '
-                    'This can likely be ignored')
-                self._logdebug('Exception: {}'.format(e))
-        self._server_socket = None
-        self._raw_socket = None
+            except OSError as exc:
+                self._logdebug('Socket close: {}'.format(exc))
 
     def reconnect(self):
         # One attempt only. Persistent retry and its wait belong to the worker.
@@ -409,20 +435,23 @@ class NTRIPClient:
         return bytes(payload)
 
     def _data_available(self):
-        # select() only sees the raw fd. With TLS a single record can
+        # poll() only sees the raw fd. With TLS a single record can
         # decrypt to more than one recv() worth of bytes; the remainder
-        # sits in the SSLSocket's internal buffer, invisible to select,
+        # sits in the SSLSocket's internal buffer, invisible to poll,
         # and would otherwise be stranded until the next TCP segment.
-        if self.ssl and self._server_socket.pending() > 0:
+        sock = self._server_socket
+        if sock is None:
+            return False
+        if self.ssl and sock.pending() > 0:
             return True
-        read_sockets, _, _ = select.select(
-            [self._server_socket], [], [], 0
-        )
-        return bool(read_sockets)
+        # select() rejects fd >= FD_SETSIZE even when the socket is healthy.
+        pending = select.poll()
+        pending.register(sock, select.POLLIN)
+        return bool(pending.poll(0))
 
     def shutdown(self):
-        # Set some state, and then disconnect
-        self._shutdown = True
+        with self._socket_lock:
+            self._shutdown = True
         self.disconnect()
 
     def _is_ntrip_v2(self):

@@ -29,8 +29,8 @@ public:
     bool update(double device_ms, int64_t ros_ns, int64_t steady_ns, bool simulated) {
         bool reset=false;
         if (valid_) {
-            const double ros_delta=static_cast<double>(ros_ns-ros_ns_);
-            const double steady_delta=static_cast<double>(steady_ns-steady_ns_);
+            const long double ros_delta=static_cast<long double>(ros_ns)-ros_ns_;
+            const long double steady_delta=static_cast<long double>(steady_ns)-steady_ns_;
             reset=device_ms+1000<device_high_ms_ || simulated!=simulated_ ||
                 ros_delta<0 || (!simulated && std::abs(ros_delta-steady_delta)>5e8) ||
                 (simulated && ros_delta>0 && ros_delta-steady_delta>5e8);

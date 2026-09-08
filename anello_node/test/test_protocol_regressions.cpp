@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 #include <cstring>
+#include <limits>
 #include <random>
 #include "../src/anello_ros_driver/messaging/protocol_decoder.h"
 #include "../src/anello_ros_driver/navigation_math.h"
 #include "../src/anello_ros_driver/sample_state.h"
 #include "../src/anello_ros_driver/clock_translator.h"
 #include "../src/anello_ros_driver/device_input.h"
+#include "../src/anello_ros_driver/rate_monitor.h"
 using namespace anello;
 namespace {
 std::string ascii(const std::string &body) {
@@ -103,6 +105,15 @@ TEST(FullProtocol, RejectsMalformedNumbersAndUnsupportedLayouts) {
     }
     StreamDecoder parser;
     EXPECT_TRUE(decode(ascii("APIMU,1000,0,nan,0,-1,1,2,3,4,0,999,20")+"\r\n",parser).empty());
+}
+TEST(FullProtocol, RejectsRepeatedNumericSigns) {
+    for (const auto field:{"+-1","++1","--1","-+1","1e+-1"}) {
+        StreamDecoder parser;
+        const auto body=std::string("APIMU,1000,0,0,0,")+field+",1,2,3,4,0,999,20";
+        EXPECT_TRUE(decode(ascii(body)+"\r\n",parser).empty())<<field;
+    }
+    StreamDecoder parser;
+    EXPECT_EQ(decode(ascii("APIMU,+1000,0,0,0,-1,1e+0,2,3,4,0,999,20")+"\r\n",parser).size(),1u);
 }
 TEST(FullProtocol, StatusAndOptionalVelocity) {
     for (const auto &status:{"255","1.5","-1"}) {
@@ -203,4 +214,79 @@ TEST(SampleState, IntegerHostEpochPreservesNanoseconds) {
     constexpr int64_t epoch=1788800000000000017LL;
     for (int i=0;i<100;++i) clock.update_ns(i*0.01,epoch+i*10000000LL);
     EXPECT_TRUE(clock.ready()); EXPECT_EQ(clock.translate_ns(0.99),epoch+990000000LL);
+}
+TEST(SampleState, ExtremeClockDifferencesDoNotOverflow) {
+    const auto minimum=std::numeric_limits<int64_t>::min();
+    const auto maximum=std::numeric_limits<int64_t>::max();
+    ClockDiscontinuity changes;
+    EXPECT_FALSE(changes.update(0,minimum,minimum,false));
+    // The forward ROS and steady steps agree, even across the signed range.
+    EXPECT_FALSE(changes.update(1,maximum,maximum,false));
+    EXPECT_TRUE(changes.update(2,minimum,maximum,false));
+    ClockTranslator clock;
+    clock.update_ns(0,minimum);
+    clock.update_ns(1,maximum);
+    EXPECT_EQ(clock.translate_ns(1),minimum+1000200000LL);
+}
+TEST(SampleState, UnrepresentableTranslationsAreUnavailable) {
+    ClockTranslator clock;
+    clock.update_ns(0,std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(clock.translate_ns(0),std::numeric_limits<int64_t>::max());
+    EXPECT_FALSE(clock.translate_ns(1));
+    EXPECT_FALSE(clock.translate_ns(INFINITY));
+    EXPECT_FALSE(clock.translate_ns(NAN));
+    clock.reset();
+    EXPECT_FALSE(clock.translate_ns(0));
+}
+TEST(SampleState, NonfiniteUpdatesCannotPoisonClockWarmup) {
+    ClockTranslator clock;
+    for (int i=0;i<100;++i) clock.update_ns(i*0.01,10000000000LL+i*10000000LL);
+    ASSERT_TRUE(clock.ready());
+    clock.update_ns(NAN,0);
+    clock.update_ns(INFINITY,0);
+    clock.update_ns(-INFINITY,0);
+    clock.update(1,INFINITY);
+    clock.update(1,-INFINITY);
+    EXPECT_TRUE(clock.ready());
+    EXPECT_EQ(clock.translate_ns(1),11000000000LL);
+}
+TEST(RateMonitor, LargeBatchesRetainCountsAndExpire) {
+    RateMonitor monitor;
+    const auto now=RateMonitor::Clock::time_point{};
+    monitor.add_ok(1000000,now);
+    monitor.add_parse_fail(2000000,now);
+    monitor.add_checksum_fail(1000000,now);
+    EXPECT_DOUBLE_EQ(monitor.rate_hz(now),200000);
+    EXPECT_DOUBLE_EQ(monitor.error_percent(now),75);
+    const auto expired=now+std::chrono::seconds(5);
+    EXPECT_DOUBLE_EQ(monitor.rate_hz(expired),0);
+    EXPECT_DOUBLE_EQ(monitor.error_percent(expired),0);
+    EXPECT_EQ(monitor.total_ok,1000000u);
+    EXPECT_EQ(monitor.total_parse_fail,2000000u);
+    EXPECT_EQ(monitor.total_checksum_fail,1000000u);
+}
+TEST(RateMonitor, WindowRollsAcrossManyBucketReuses) {
+    RateMonitor monitor;
+    const auto start=RateMonitor::Clock::time_point{};
+    for (int i=0;i<500;++i) {
+        auto now=start+std::chrono::milliseconds(100*i);
+        monitor.add_ok(1,now);
+        monitor.add_checksum_fail(1,now);
+        EXPECT_DOUBLE_EQ(monitor.rate_hz(now),std::min(i+1,50)/5.0);
+        EXPECT_DOUBLE_EQ(monitor.error_percent(now),50);
+    }
+    auto later=start+std::chrono::seconds(70);
+    monitor.add_ok(10,later);
+    EXPECT_DOUBLE_EQ(monitor.rate_hz(later),2);
+    EXPECT_DOUBLE_EQ(monitor.error_percent(later),0);
+}
+TEST(RateMonitor, ClockRewindCannotResurrectOldBuckets) {
+    RateMonitor monitor;
+    const auto start=RateMonitor::Clock::time_point{};
+    monitor.add_ok(10,start+std::chrono::seconds(100));
+    EXPECT_DOUBLE_EQ(monitor.rate_hz(start),0);
+    monitor.add_parse_fail(10,start);
+    EXPECT_DOUBLE_EQ(monitor.error_percent(start),100);
+    EXPECT_DOUBLE_EQ(monitor.rate_hz(start+std::chrono::seconds(100)),0);
+    EXPECT_EQ(monitor.total_ok,10u);
 }

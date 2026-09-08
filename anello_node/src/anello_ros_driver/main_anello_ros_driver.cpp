@@ -13,7 +13,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
-#include <deque>
 #include <fstream>
 #include <vector>
 #include <unistd.h>
@@ -66,6 +65,7 @@
 
 #include "bit_tools.h"
 #include "clock_translator.h"
+#include "rate_monitor.h"
 #include "version.h"
 #include "messaging/rtcm_decoder.h"
 #include "messaging/message_publisher.h"
@@ -131,55 +131,6 @@ struct ReadBuffer
     int nbytes = 0;
     char buff[MAX_BUF_LEN] = {};
     rclcpp::Time stamp;  // host time captured at the port read
-};
-
-/* Sliding-window message/error rates for diagnostics: lifetime totals
- * plus a trailing window, so a device that stops streaming (or a link
- * that degrades) is visible on /diagnostics instead of showing the last
- * known health flags as "nominal". Single-threaded access only. */
-struct RateMonitor
-{
-    static constexpr double kWindowSeconds = 5.0;
-
-    uint64_t total_ok = 0;
-    uint64_t total_checksum_fail = 0;
-    uint64_t total_parse_fail = 0;
-
-    void add_ok()            { total_ok++;            push(recent_ok_); }
-    void add_checksum_fail() { total_checksum_fail++; push(recent_err_); }
-    void add_parse_fail()    { total_parse_fail++;    push(recent_err_); }
-
-    double rate_hz()
-    {
-        trim(recent_ok_);
-        return static_cast<double>(recent_ok_.size()) / kWindowSeconds;
-    }
-    double error_percent()
-    {
-        trim(recent_ok_);
-        trim(recent_err_);
-        const size_t total = recent_ok_.size() + recent_err_.size();
-        return total > 0
-            ? 100.0 * static_cast<double>(recent_err_.size()) / static_cast<double>(total)
-            : 0.0;
-    }
-
-private:
-    std::deque<std::chrono::steady_clock::time_point> recent_ok_;
-    std::deque<std::chrono::steady_clock::time_point> recent_err_;
-
-    static void trim(std::deque<std::chrono::steady_clock::time_point> &q)
-    {
-        const auto cutoff = std::chrono::steady_clock::now() -
-            std::chrono::milliseconds(static_cast<int64_t>(kWindowSeconds * 1000));
-        while (!q.empty() && q.front() < cutoff)
-            q.pop_front();
-    }
-    static void push(std::deque<std::chrono::steady_clock::time_point> &q)
-    {
-        trim(q);
-        q.push_back(std::chrono::steady_clock::now());
-    }
 };
 
 class AnelloRosDriver : public rclcpp::Node
@@ -844,8 +795,8 @@ private:
                     dispatch(packet);
                 });
         }
-        for (auto n=crc_before;n<decoder_.checksum_failures;++n) rate_monitor_.add_checksum_fail();
-        for (auto n=parse_before;n<decoder_.parse_failures;++n) rate_monitor_.add_parse_fail();
+        rate_monitor_.add_checksum_fail(decoder_.checksum_failures-crc_before);
+        rate_monitor_.add_parse_fail(decoder_.parse_failures-parse_before);
         frame_fail_reported_=crc_before!=decoder_.checksum_failures || parse_before!=decoder_.parse_failures;
         if (frame_fail_reported_) data_port_->port_parse_fail();
         return count;
@@ -872,7 +823,7 @@ private:
             clock_translator_.update_ns(ms*1e-3,read_buf_.stamp.nanoseconds());
             if (clock_translator_.ready()) {
                 auto ns=clock_translator_.translate_ns(ms*1e-3);
-                if (ns>=0) return rclcpp::Time(ns,read_buf_.stamp.get_clock_type());
+                if (ns && *ns>=0) return rclcpp::Time(*ns,read_buf_.stamp.get_clock_type());
             }
         }
         return read_buf_.stamp;

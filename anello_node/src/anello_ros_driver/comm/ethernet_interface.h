@@ -30,18 +30,18 @@ protected:
     struct sockaddr_in servaddr, cliaddr;
 
 public:
-    ethernet_interface(std::string remote_ip_address, int remote_port, int local_port);
-    ~ethernet_interface();
+    ethernet_interface(const std::string &remote_ip_address, int remote_port, int local_port);
+    ~ethernet_interface() override;
 
     ethernet_interface(const ethernet_interface &)=delete;
     ethernet_interface &operator=(const ethernet_interface &)=delete;
     uint64_t truncated_datagrams() const { return truncated_; }
     void init();
 
-    size_t get_data(char *buf, size_t buf_len);
+    size_t get_data(char *buf, size_t buf_len) override;
     size_t get_data(char *buf, size_t buf_len, int timeout_ms);
-    bool write_data(const char *buf, size_t buf_len);
-    std::string get_remote_ip() const { return remote_ip_address; }
+    bool write_data(const char *buf, size_t buf_len) override;
+    const std::string &get_remote_ip() const { return remote_ip_address; }
 };
 
 #endif

@@ -275,6 +275,38 @@ def test_sim_clock_zero_pause_and_backward_jump(driver_factory):
     assert driver.messages['odom'][-1].header.stamp.sec == 50
 
 
+def test_noise_burst_keeps_diagnostics_and_measurements_responsive(driver_factory):
+    driver = driver_factory()
+    for _ in range(32):
+        driver.socket.sendto(b'#' * 1000, ('127.0.0.1', driver.port))
+        driver.spin(0.01)
+    driver.send(imu(1000), ins(1010))
+    driver.spin(1.1)
+    driver.assert_alive()
+    assert driver.messages['raw'] and driver.messages['odom']
+    statuses = [status for msg in driver.messages['diag'] for status in msg.status
+                if driver.namespace in status.name and status.name.endswith('Device Status')]
+    assert statuses
+    values = {item.key: item.value for item in statuses[-1].values}
+    assert int(values['parse_failures_total']) >= 30000
+    assert float(values['error_rate_percent_recent']) > 99
+
+
+def test_mcu_extremes_and_reboot_remain_publishable(driver_factory):
+    driver = driver_factory(overrides={'timestamp_source': 'mcu'})
+    # Exercise the actual decoder -> translator -> ROS publication path at
+    # the largest accepted MCU timestamp, then return to ordinary uptime.
+    for i in range(16):
+        driver.send(*(imu(9e12 - 1000 + i * 40 + j) for j in range(8)), delay=0.03)
+    assert driver.messages['raw']
+    driver.send(ins(9e12))
+    assert driver.messages['odom']
+    count = len(driver.messages['odom'])
+    driver.send(imu(0), ins(1))
+    assert len(driver.messages['odom']) == count + 1
+    assert driver.messages['odom'][-1].header.stamp.sec > 0
+
+
 @pytest.mark.parametrize('launch', ['anello_driver.launch.py', 'anello_ros_driver_launch.xml'])
 def test_installed_launch_preserves_types_and_parameter_file(driver_factory, launch):
     assert Path(get_package_share_directory('anello_ros_driver'), 'launch', launch).is_file()

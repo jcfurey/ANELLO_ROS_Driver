@@ -6,9 +6,9 @@ import xml.etree.ElementTree as ET
 
 root = Path(sys.argv[1])
 for package, pattern, minimum in (
-        ('anello_ros_driver', '**/test_anello_decoding.gtest.xml', 79),
-        ('anello_ros_driver', '**/test_ros_regressions.xunit.xml', 31),
-        ('ntrip_client', '**/pytest.xml', 58)):
+        ('anello_ros_driver', '**/test_anello_decoding.gtest.xml', 86),
+        ('anello_ros_driver', '**/test_ros_regressions.xunit.xml', 33),
+        ('ntrip_client', '**/pytest.xml', 69)):
     files = list((root / package).glob(pattern))
     if not files:
         raise SystemExit('Missing test results: ' + package)

@@ -119,7 +119,10 @@ bool decode_ascii_frame(const std::string &frame, DecodedPacket &p) {
         if (fields[i].empty() || fields[i].find_first_not_of("+-0123456789.eE")!=std::string::npos)
             return false;
         const char *begin=fields[i].data(), *end=begin+fields[i].size();
-        if (*begin=='+') ++begin;
+        if (*begin=='+') {
+            ++begin;
+            if (begin==end || *begin=='-' || *begin=='+') return false;
+        }
         const auto conversion=std::from_chars(begin,end,parsed[i-1],std::chars_format::general);
         if (conversion.ec!=std::errc() || conversion.ptr!=end || !std::isfinite(parsed[i-1])) return false;
     }
