@@ -22,14 +22,24 @@ bool latitude(double v) { return std::isfinite(v) && std::abs(v) <= 90; }
 bool longitude(double v) { return std::isfinite(v) && std::abs(v) <= 180; }
 bool psd(const double *v) {
     // Packed symmetric matrix: three diagonals followed by xy,xz,yz.
-    if (v[0] < 0 || v[1] < 0 || v[2] < 0) return false;
-    const double scale = std::max({v[0], v[1], v[2]});
-    if (scale == 0) return v[3] == 0 && v[4] == 0 && v[5] == 0;
-    double a=v[0]/scale, b=v[1]/scale, c=v[2]/scale;
-    double d=v[3]/scale, e=v[4]/scale, f=v[5]/scale;
+    if (v[0] < 0 || v[1] < 0 || v[2] < 0 || !std::isfinite(v[0]+v[1]+v[2])) return false;
+    // Check correlations per axis pair; a large third-axis variance must not
+    // hide an indefinite block on the two quieter axes.
     constexpr double eps=1e-6;  // allow binary float rounding
-    return d*d <= a*b+eps && e*e <= a*c+eps && f*f <= b*c+eps &&
-        a*b*c+2*d*e*f-a*f*f-b*e*e-c*d*d >= -eps;
+    double correlations[3]{};
+    int pair=0;
+    for (int i=0;i<3;++i) for (int j=i+1;j<3;++j,++pair) {
+        const double scale=std::sqrt(v[i])*std::sqrt(v[j]);
+        if (scale==0) {
+            if (v[3+pair]!=0) return false;
+        } else {
+            correlations[pair]=v[3+pair]/scale;
+            if (!std::isfinite(correlations[pair]) || std::abs(correlations[pair])>1+eps)
+                return false;
+        }
+    }
+    const double d=correlations[0], e=correlations[1], f=correlations[2];
+    return 1+2*d*e*f-d*d-e*e-f*f >= -eps;
 }
 bool ascii_checksum(const std::string &frame) {
     return frame.size() <= 1200 && frame.find_first_of("\r\n") == std::string::npos &&

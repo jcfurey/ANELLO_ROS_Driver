@@ -227,7 +227,7 @@ private:
         declare_parameter("covariance.unknown_variance", 1e6,
             d("Conservative odometry variance when uncertainty or a twist field is unavailable"));
         declare_parameter("imu_output_rate_hz", 100.0,
-            d("Rate used to scale datasheet noise estimates; calibrate covariance for actual bandwidth"));
+            d("Legacy rate hint; does not configure the device or determine covariance"));
         declare_parameter("accel_sign_check_upright", false,
             d("Enable gravity-sign warning only when the IMU is known to be mounted upright at startup"));
         declare_parameter("publish_custom_messages", true, d("Publish device-native anello message topics"));
@@ -277,17 +277,16 @@ private:
               "MEMS WZ. Set false if the FOG is disabled on the unit "
               "(APCFG fog off)."));
 
-        // Defaults derived from the ANELLO GNSS INS datasheet noise specs at
-        // 100 Hz: MEMS gyro ARW 0.3 deg/sqrt(hr), optical Z gyro ARW
-        // 0.05 deg/sqrt(hr), accelerometer VRW 0.03 m/s/sqrt(hr).
+        // A model's random-walk specification and output rate alone do not
+        // establish per-sample uncertainty for this unit and filter bandwidth.
         declare_parameter("covariance.angular_velocity",
             std::vector<double>{},
             d("Diagonal angular velocity covariance [x, y, z] in (rad/s)^2 "
-              "for imu/data and imu/data_raw (REP-145 parameter override)"));
+              "for imu/data and imu/data_raw; [] leaves uncertainty unknown"));
         declare_parameter("covariance.linear_acceleration",
             std::vector<double>{},
             d("Diagonal linear acceleration covariance [x, y, z] in "
-              "(m/s^2)^2 for imu/data and imu/data_raw"));
+              "(m/s^2)^2 for imu/data and imu/data_raw; [] means unknown"));
     }
 
     void read_parameters()
@@ -392,26 +391,23 @@ private:
         if (odo_rate>100) throw std::invalid_argument("odometer.max_rate_hz must be <=100");
         odo_budget_=TrafficBudget(odo_rate,1);
         cov_max_age_=positive("covariance.max_age"); unknown_variance_=positive("covariance.unknown_variance");
-        const double rate_scale=positive("imu_output_rate_hz")/100.0;
+        positive("imu_output_rate_hz");  // retained for existing launch/config files
         const auto convention=get_parameter("covariance.device_convention").as_string();
         if (convention!="unknown" && convention!="verified_m2_deg2_euler")
             throw std::invalid_argument("Unsupported covariance.device_convention");
         use_device_cov_=convention=="verified_m2_deg2_euler";
         publish_custom_=get_parameter("publish_custom_messages").as_bool();
         health_msg_.set_fog_enabled(use_fog_wz_);
-        auto read_cov3=[this,rate_scale](const char *name, double out[3], std::vector<double> defaults) {
+        auto read_cov3=[this](const char *name, double out[3]) {
             auto values=get_parameter(name).as_double_array();
-            if (values.empty()) {
-                values=defaults;
-                for (double &v:values) v*=rate_scale;
-            }
+            if (values.empty()) values.assign(3,0.0);
             if (values.size()!=3 || std::any_of(values.begin(),values.end(),
                 [](double v){return !std::isfinite(v) || v<0;}))
-                throw std::invalid_argument(std::string(name)+" needs three finite nonnegative variances, or [] for automatic defaults");
+                throw std::invalid_argument(std::string(name)+" needs three finite nonnegative variances, or [] for unknown covariance");
             std::copy(values.begin(),values.end(),out);
         };
-        read_cov3("covariance.angular_velocity",ang_vel_cov_,{7.6e-7,7.6e-7,use_fog_wz_?2.1e-8:7.6e-7});
-        read_cov3("covariance.linear_acceleration",lin_acc_cov_,{2.5e-5,2.5e-5,2.5e-5});
+        read_cov3("covariance.angular_velocity",ang_vel_cov_);
+        read_cov3("covariance.linear_acceleration",lin_acc_cov_);
 
         RCLCPP_INFO(get_logger(), "com_type=%s baud=%u poll=%ldms",
                      com_type.c_str(), config_.baud_rate, poll_ms_);
@@ -1059,10 +1055,12 @@ private:
     }
 
     bool covariance_fresh(double ms) const {
-        return use_device_cov_ && cov_time_.matches(ms,cov_max_age_) &&
-            cov_cache_.pos[0]+cov_cache_.pos[4]+cov_cache_.pos[8]>0 &&
-            cov_cache_.orient[0]+cov_cache_.orient[4]+cov_cache_.orient[8]>0 &&
-            cov_cache_.vel[0]+cov_cache_.vel[4]+cov_cache_.vel[8]>0;
+        return use_device_cov_ && cov_time_.matches(ms,cov_max_age_);
+    }
+    static bool covariance_known(const double c[9]) {
+        // A zero axis from device telemetry does not establish perfect accuracy.
+        // Each block is independent: missing position must not erase attitude.
+        return c[0]>0 && c[4]>0 && c[8]>0;
     }
     tf2::Matrix3x3 orientation_covariance(const double ins[]) const {
         double c[9];
@@ -1084,7 +1082,7 @@ private:
             if (!gyro_available(imu_cache_)) imu.angular_velocity_covariance[0]=-1;
         }
         else { imu.angular_velocity_covariance[0]=-1; imu.linear_acceleration_covariance[0]=-1; }
-        if (fresh_cov) {
+        if (fresh_cov && covariance_known(cov_cache_.orient)) {
             const auto c=orientation_covariance(ins);
             for (int r=0;r<3;++r) for (int col=0;col<3;++col) imu.orientation_covariance[3*r+col]=c[r][col];
         }
@@ -1099,7 +1097,7 @@ private:
         nav.latitude=position_valid?ins[3]:NAN;
         nav.longitude=position_valid?ins[4]:NAN;
         nav.altitude=position_valid?ins[5]:NAN;
-        if (fresh_cov && position_valid) {
+        if (fresh_cov && position_valid && covariance_known(cov_cache_.pos)) {
             const double *p=cov_cache_.pos;
             nav.position_covariance={p[4],p[1],p[5],p[1],p[0],p[2],p[5],p[2],p[8]};
             nav.position_covariance_type=sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN;
@@ -1148,9 +1146,11 @@ private:
             const auto att_cov=world_rotation*orientation_covariance(ins)*world_rotation.transpose();
             const auto vel_cov=body_to_current.transpose()*cv*body_to_current;
             for (int r=0;r<3;++r) for (int c=0;c<3;++c) {
-                odom.pose.covariance[6*r+c]=pos_cov[r][c];
-                odom.pose.covariance[6*(r+3)+c+3]=att_cov[r][c];
-                if (velocity_valid) odom.twist.covariance[6*r+c]=vel_cov[r][c];
+                if (covariance_known(p)) odom.pose.covariance[6*r+c]=pos_cov[r][c];
+                if (covariance_known(cov_cache_.orient))
+                    odom.pose.covariance[6*(r+3)+c+3]=att_cov[r][c];
+                if (velocity_valid && covariance_known(v))
+                    odom.twist.covariance[6*r+c]=vel_cov[r][c];
             }
         }
         pub_odom_->publish(odom);

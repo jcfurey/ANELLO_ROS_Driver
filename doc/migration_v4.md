@@ -14,7 +14,7 @@ This release implements the September 2026 driver audit fixes. Rebuild all three
 | Old IMU/APCOV samples reused indefinitely | Acquisition and steady-clock age limits, plus cache resets on reconnect/reboot/clock changes. |
 | APCOV assumed to be metres²/degrees² | Default is `covariance.device_convention=unknown`. Opt into `verified_m2_deg2_euler` only with firmware evidence; see integration guide. |
 | Zero odometry covariance used before measurements | Configurable conservative fallback variance (default 1e6). Missing IMU estimates use covariance[0]=-1. |
-| Fixed FOG covariance even with MEMS selected | Empty covariance arrays select source/rate-dependent estimates. Explicit three-element arrays override them and must be finite/nonnegative. |
+| Fixed FOG covariance even with MEMS selected | Empty covariance arrays now mean unknown uncertainty for either source. Explicit three-element arrays provide measured SI variances and must be finite/nonnegative; the former source/rate-based automatic estimates have been removed. |
 | Approximate latitude/longitude scaling | WGS84 ECEF-to-ENU position, including altitude, with consistent anchor/current-axis rotations and attitude covariance Jacobian. |
 | All four GNSS constellations claimed | `gnss_service_mask=0` unless configured. Two-dimensional height is unavailable; Hacc/Vacc-derived covariance is APPROXIMATED. |
 | GGA PDOP placed in HDOP | HDOP is left empty, geoid separation comes from ellipsoid minus MSL height, and `gps_utc_leap_seconds` makes UTC conversion configurable. |
@@ -75,7 +75,7 @@ Pass it using `params_file:=/absolute/path/anello.yaml`. ROS parameter files mus
 | 13 — Humble API | Version-compatible service QoS call and Humble CI job; local verification remains Lyrical only |
 | 14 — Python test discovery | `colcon.pkg` pytest selection, extras metadata, explicit CI command and required-suite checks; ordinary colcon discovery verified locally |
 | 15 — local projection | WGS84 ECEF/ENU helper and rotations, curvature/altitude/antimeridian/Jacobian tests |
-| 16 — covariance source/rate | MEMS/FOG defaults, rate scaling, explicit overrides, invalid-parameter and published-message regressions |
+| 16 — covariance source/rate | Unknown MEMS/FOG defaults at every rate, measured overrides, invalid-parameter and published-message regressions |
 | 17 — transport writes | Bounded partial-write handling, fd ownership, callback separation, send results/counters; backpressure, completion, descriptor-zero, and reconnect tests |
 
 Additional fixes from the continued review include overflow-safe GGA conversion, correct dilution/height metadata, saturated-rate availability, distinct diagnostic instance names, retained batched INS output, validated command replies, parameter range checks before narrowing, rejection of undersized RTCM corrections and embedded NMEA line endings, and expiry of corrections delayed in the publication queue. Obsolete unvalidated ASCII decoders and the C++11 makefile were removed; protocol records, clock/sample state, navigation math, publisher types, and transport headers are separated from the public node factory.

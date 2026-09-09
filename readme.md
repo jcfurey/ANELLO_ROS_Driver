@@ -88,8 +88,8 @@ Parameters are read-only while running; restart to change them.
 | `imu_max_age`, `covariance.max_age` | 0.05, 0.2 s | Maximum acquisition-time separation and steady-clock cache age |
 | `covariance.device_convention` | `unknown` | Enable `verified_m2_deg2_euler` only after obtaining the firmware contract |
 | `covariance.unknown_variance` | 1e6 | Conservative odometry diagonal fallback when uncertainty/fields are unavailable |
-| `covariance.angular_velocity`, `covariance.linear_acceleration` | `[]` | Three nonnegative finite SI variances; empty selects automatic estimates |
-| `imu_output_rate_hz` | 100 | Scales automatic estimates; does not configure device output rate |
+| `covariance.angular_velocity`, `covariance.linear_acceleration` | `[]` | Three nonnegative finite SI variances; empty means unknown uncertainty |
+| `imu_output_rate_hz` | 100 | Legacy rate hint; does not configure device rate or determine covariance |
 | `expected_streams` | `[imu, ins, gps]` | Streams required for healthy diagnostics; Ground IMU normally uses `[imu]` |
 | `stream_timeout` | 2 s | Maximum silence for each expected stream |
 | `heading_baseline` | 0 m | Measured dual-antenna separation; zero skips baseline comparison |
@@ -103,7 +103,7 @@ Parameters are read-only while running; restart to change them.
 | `odometer.max_speed_mps` | 100 | Reject larger absolute speeds; configurable up to 1000 m/s |
 | `odometer.max_rate_hz` | 50 | Send at most this rate, no burst; configurable up to 100 Hz |
 
-At 100 Hz, automatic angular variances are `[7.6e-7, 7.6e-7, 2.1e-8]` with FOG, or `[7.6e-7, 7.6e-7, 7.6e-7]` with MEMS. Acceleration variances are `[2.5e-5, 2.5e-5, 2.5e-5]`. These are noise estimates, not calibrated accuracy claims; filtering and bandwidth affect them. Explicit arrays override rate scaling. Zero IMU covariance means unknown; odometry uses the configured conservative fallback instead of interpreting zero as unknown.
+Empty covariance arrays now publish all-zero IMU covariance (unknown), for both FOG and MEMS selection. Earlier revisions inferred small variances from one model's datasheet random-walk specifications and the requested output rate; those assumptions did not establish this unit's bandwidth or accuracy. Supply explicit measured SI variances for the selected gyro source, unit, output rate, and filter settings. Explicit values are already in the published FLU axes and final SI units and are not scaled with `imu_output_rate_hz`. Odometry uses the configured conservative fallback for unknown uncertainty.
 
 ## NTRIP and commands
 

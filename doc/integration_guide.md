@@ -26,7 +26,7 @@ INS-derived IMU output combines raw body fields only if acquisition times differ
 
 For a missing IMU estimate, the applicable covariance element 0 is -1. Unknown orientation uncertainty is an all-zero matrix, as specified by `sensor_msgs/Imu`. Odometry has no corresponding unknown marker: unavailable uncertainty/fields use the configured `covariance.unknown_variance` diagonal (default 1e6). Consumers must treat those as weak estimates, not measured zero velocity.
 
-An enabled FOG returning a stuck/zero sequence degrades health. A selected FOG near its range limit (MEMS magnitude at least 180 deg/s or optical magnitude at least 200 deg/s) is marked unavailable on standard gyro output; its nominal small noise variance cannot describe saturation. Acceleration remains usable when gyro availability alone is lost. Set `use_fog_wz=false` when the optical gyro is disabled in firmware.
+An enabled FOG returning a stuck/zero sequence degrades health. A selected FOG near its range limit (MEMS magnitude at least 180 deg/s or optical magnitude at least 200 deg/s) is marked unavailable on standard gyro output; a configured noise variance cannot describe saturation. Acceleration remains usable when gyro availability alone is lost. Set `use_fog_wz=false` when the optical gyro is disabled in firmware.
 
 ## Covariance and physical accuracy
 
@@ -37,11 +37,11 @@ The default `covariance.device_convention=unknown` leaves APCOV available on the
 - Attitude covariance is aerospace roll/pitch/heading **Euler-angle covariance in degrees squared**, rather than quaternion/small-angle covariance in another basis.
 - The covariances refer to the reported output centre and timestamps.
 
-That mode permutes/signs the position and velocity blocks, converts attitude units, applies the Euler-to-fixed-axis Jacobian at the current attitude, and rotates blocks into their published frames. APCOV does not provide all position-attitude/velocity-attitude cross correlations; the 6×6 odometry representation uses a block-diagonal approximation. Stale or entirely zero blocks do not claim perfect accuracy. Other firmware covariance conventions require an explicit new conversion with fixtures; do not infer units from magnitude alone.
+That mode permutes/signs the position and velocity blocks, converts attitude units, applies the Euler-to-fixed-axis Jacobian at the current attitude, and rotates blocks into their published frames. APCOV does not provide all position-attitude/velocity-attitude cross correlations; the 6×6 odometry representation uses a block-diagonal approximation. Stale blocks or blocks with any zero diagonal do not claim perfect accuracy. Position, velocity, and attitude availability are checked independently, so an unavailable block does not discard the other estimates. Other firmware covariance conventions require an explicit new conversion with fixtures; do not infer units from magnitude alone.
 
 Raw GNSS `gps/fix` covariance uses Hacc² on east/north and Vacc² on up, marked **APPROXIMATED** because the receiver confidence definition must be confirmed. A 2D fix has NaN altitude and unknown covariance; invalid fixes do not become RTK-valid from a retained RTK field. `gnss_service_mask=0` avoids claiming unverified constellations. Configure the actual NavSatStatus mask when known.
 
-Verify acceleration sign in six static orientations and gyro sign with known positive rotations. The startup gravity warning is opt-in for a known upright mount; it cannot diagnose an arbitrary orientation. Automatic covariance estimates assume the configured sample rate and white noise. Use measured variance/bandwidth for accuracy work.
+Verify acceleration sign in six static orientations and gyro sign with known positive rotations. The startup gravity warning is opt-in for a known upright mount; it cannot diagnose an arbitrary orientation. Empty `covariance.angular_velocity` and `covariance.linear_acceleration` arrays leave uncertainty unknown (all zeros). No per-sample noise is inferred from the output rate or a model datasheet. Supply three finite nonnegative diagonal variances in published FLU axes and final SI units from measurements of the actual unit, selected FOG/MEMS channel, output rate, and filter bandwidth. `imu_output_rate_hz` remains accepted for compatibility but does not determine covariance. A partially zero explicit array means known zero variance on those axes; use an entirely zero array for unknown uncertainty.
 
 ## Choosing measurements for localization
 

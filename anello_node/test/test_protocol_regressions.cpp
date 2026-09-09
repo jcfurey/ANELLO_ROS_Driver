@@ -290,3 +290,16 @@ TEST(RateMonitor, ClockRewindCannotResurrectOldBuckets) {
     EXPECT_DOUBLE_EQ(monitor.rate_hz(start+std::chrono::seconds(100)),0);
     EXPECT_EQ(monitor.total_ok,10u);
 }
+
+TEST(FullProtocol, CovarianceCannotHideInvalidQuietAxes) {
+    for (const auto &packed : {"1,1e-12,1e-12,0,0,1e-7",
+                               "1,0,1,1e-8,0,0",
+                               "1,1e-12,1e-12,9e-7,9e-7,-9e-13",
+                               "1e308,1e308,1e308,0,0,0"}) {
+        DecodedPacket result;
+        EXPECT_FALSE(decode_ascii_frame(ascii(std::string("APCOV,1000,") + packed +
+            ",1,2,3,0,0,0,1,2,3,0,0,0"), result));
+    }
+    DecodedPacket result;
+    EXPECT_TRUE(decode_ascii_frame(ascii("APCOV,1000,1e12,1e-12,1,.5,0,0,1,2,3,0,0,0,1,2,3,0,0,0"), result));
+}

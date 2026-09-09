@@ -188,26 +188,31 @@ def test_invalid_navigation_never_publishes_position_or_tf(driver_factory):
 def test_acquisition_and_wall_age_expire_imu_and_covariance(driver_factory):
     driver = driver_factory(overrides={'covariance.device_convention': 'verified_m2_deg2_euler'})
     driver.send(imu(1000), cov(1000), ins(1010))
-    assert driver.messages['imu'][-1].angular_velocity_covariance[0] > 0
+    assert driver.messages['imu'][-1].angular_velocity_covariance[0] == 0
     assert driver.messages['fix'][-1].position_covariance_type == 3
     driver.send(ins(1400))
     assert driver.messages['imu'][-1].angular_velocity_covariance[0] == -1
     assert driver.messages['fix'][-1].position_covariance_type == 0
     driver.send(imu(1500, kind='APIM1'), cov(1500), ins(1510))
-    assert driver.messages['imu'][-1].angular_velocity_covariance[0] > 0
+    assert driver.messages['imu'][-1].angular_velocity_covariance[0] == 0
     driver.spin(0.3)
     driver.send(ins(1520))
     assert driver.messages['imu'][-1].linear_acceleration_covariance[0] == -1
     assert driver.messages['fix'][-1].position_covariance_type == 0
 
 
-def test_unverified_covariance_and_mems_defaults(driver_factory):
-    driver = driver_factory(overrides={'use_fog_wz': False})
+@pytest.mark.parametrize('fog,rate', [(False, 100.0), (True, 100.0), (True, 1000.0)])
+def test_unverified_covariance_is_unknown_for_every_source_and_rate(driver_factory, fog, rate):
+    driver = driver_factory(overrides={'use_fog_wz': fog, 'imu_output_rate_hz': rate})
     driver.send(imu(1000), cov(1000), ins(1010))
     assert driver.messages['fix'][-1].position_covariance_type == 0
     raw = driver.messages['raw'][-1]
-    assert raw.angular_velocity_covariance[8] == pytest.approx(7.6e-7)
-    assert raw.angular_velocity.z == pytest.approx(-3 * math.pi / 180)
+    for key in ('raw', 'imu'):
+        assert list(driver.messages[key][-1].angular_velocity_covariance) == [0.0] * 9
+        assert list(driver.messages[key][-1].linear_acceleration_covariance) == [0.0] * 9
+    assert list(driver.messages['imu'][-1].orientation_covariance) == [0.0] * 9
+    assert driver.messages['odom'][-1].twist.covariance[35] == 1e6
+    assert raw.angular_velocity.z == pytest.approx(-(4 if fog else 3) * math.pi / 180)
     assert raw.linear_acceleration.z == pytest.approx(9.80665)
     assert not driver.messages['tf']
 
@@ -354,7 +359,7 @@ def test_saturated_fog_is_not_published_as_precise_rate(driver_factory):
     driver.send(imu(1000).replace(',1,2,3,4,', ',1,2,250,200,'), ins(1010))
     assert driver.messages['raw'][-1].angular_velocity_covariance[0] == -1
     assert driver.messages['imu'][-1].angular_velocity_covariance[0] == -1
-    assert driver.messages['imu'][-1].linear_acceleration_covariance[0] > 0
+    assert driver.messages['imu'][-1].linear_acceleration_covariance[0] == 0
     assert driver.messages['odom'][-1].twist.covariance[35] == 1e6
 
 
@@ -586,3 +591,46 @@ def test_device_input_rejects_same_serial_device_through_alias(driver_factory, t
     finally:
         os.close(master)
         os.close(slave)
+
+
+@pytest.mark.parametrize('fog,rate', [(False, 100.0), (True, 1000.0)])
+def test_measured_covariance_overrides_reach_raw_fused_and_odometry(driver_factory, fog, rate):
+    driver = driver_factory(overrides={
+        'use_fog_wz': fog, 'imu_output_rate_hz': rate, 'flip_accel_sign': True,
+        'covariance.angular_velocity': [0.01, 0.02, 0.03],
+        'covariance.linear_acceleration': [0.1, 0.2, 0.3]})
+    driver.send(imu(1000), ins(1010))
+    for key in ('raw', 'imu'):
+        assert list(driver.messages[key][-1].angular_velocity_covariance) == pytest.approx(
+            [.01, 0, 0, 0, .02, 0, 0, 0, .03])
+        assert list(driver.messages[key][-1].linear_acceleration_covariance) == pytest.approx(
+            [.1, 0, 0, 0, .2, 0, 0, 0, .3])
+    angular = driver.messages['odom'][-1].twist.covariance
+    assert [angular[i] for i in (21, 28, 35)] == [.01, .02, .03]
+    driver.send(imu(1100).replace(',1,2,3,4,', ',1,2,250,200,'), ins(1110))
+    if fog:
+        assert driver.messages['raw'][-1].angular_velocity_covariance[0] == -1
+        assert driver.messages['imu'][-1].angular_velocity_covariance[0] == -1
+        assert driver.messages['odom'][-1].twist.covariance[35] == 1e6
+    driver.send(imu(1200), ins(1210))
+    assert driver.messages['imu'][-1].angular_velocity_covariance[8] == .03
+
+
+@pytest.mark.parametrize('missing', ['position', 'velocity', 'attitude', 'partial_position'])
+def test_device_covariance_blocks_are_independently_available(driver_factory, missing):
+    driver = driver_factory(overrides={'covariance.device_convention': 'verified_m2_deg2_euler'})
+    blocks = {'position': [1, 2, 3, 0, 0, 0], 'velocity': [4, 5, 6, 0, 0, 0],
+              'attitude': [1, 2, 3, 0, 0, 0]}
+    if missing == 'partial_position':
+        blocks['position'][0] = 0
+    else:
+        blocks[missing] = [0] * 6
+    values = ','.join(str(x) for block in blocks.values() for x in block)
+    driver.send('APCOV,1000,' + values, ins(1010))
+    odom = driver.messages['odom'][-1]
+    expected_type = 0 if 'position' in missing else 3
+    assert driver.messages['fix'][-1].position_covariance_type == expected_type
+    assert (odom.pose.covariance[0] == 1e6) == ('position' in missing)
+    assert (odom.twist.covariance[0] == 1e6) == (missing == 'velocity')
+    assert (odom.pose.covariance[35] == 1e6) == (missing == 'attitude')
+    assert (driver.messages['imu'][-1].orientation_covariance[8] == 0) == (missing == 'attitude')
