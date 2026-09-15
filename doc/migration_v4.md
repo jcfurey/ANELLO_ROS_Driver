@@ -23,6 +23,10 @@ This release implements the September 2026 driver audit fixes. Rebuild all three
 | Startup queried antenna baseline | Configure `heading_baseline` explicitly. Zero skips the check; it no longer adds a blocking startup query. |
 | Aggregate traffic hid missing streams; zero FOG samples ignored | Explicit `expected_streams`, per-stream ages, unavailable health states, and enabled-FOG zero/stuck detection. Ground IMU normally selects `[imu]`. |
 | FOG saturation retained its small nominal variance | Selected saturated FOG rate is unavailable on standard output; acceleration remains usable. |
+| Unavailable vectors retained finite or zero values | Unavailable IMU gyro/acceleration and odometry twist vectors use NaNs; IMU covariance element 0 remains -1 and odometry uses conservative variance. Native measurements retain device values. |
+| Position/attitude-only INS states claimed absolute orientation | States 0/1/8/9 mark standard orientation unavailable and withhold odometry/TF. States 1/9 still publish valid position on `ins/fix`. |
+| Saturation could coexist with nominal diagnostics/APHEALTH | The selected optical range guard now sets gyro health bad immediately, with a diagnostic reason matching standard measurement availability. |
+| Only INS rejected duplicate/older acquisition times | Ordering now applies per logical stream before cache/health updates. APIMU/APIM1 share ordering; streams report accepted rates, rejection/gap totals, and separate clock/transport reset causes. |
 | Clock translation crept across host clock steps | Translation, caches, and ordering reset together; paused/uninitialized simulated time does not create advancing measurements. |
 | Partial/failed writes were not visible to callers | Complete bounded serial writes and checked UDP sends; failures counted in diagnostics; RTCM uses its own callback group. |
 | NTRIP exited when startup connection failed | Background persistent retries, first/valid-frame deadlines, bounded queue, fresh GGA resend, expired correction rejection, and diagnostics. |

@@ -24,6 +24,16 @@ The suites cover full ASCII/RTCM frames, numerical conversion, covariance and co
 
 ## Launch
 
+Copy and edit the installed [commented example YAML](anello_node/config/anello_example.yaml). Set the data-port symlink, baud rate, and streams to match the unit; the file includes frame, timing, and unknown-covariance defaults.
+
+```bash
+cp "$(ros2 pkg prefix --share anello_ros_driver)/config/anello_example.yaml" ./anello.yaml
+# Edit anello.yaml for this unit, then:
+ros2 launch anello_ros_driver anello_driver.launch.py params_file:="$PWD/anello.yaml"
+```
+
+For a raw-IMU bench session without INS/GNSS output, set `expected_streams: [imu]`. Device rate, firmware mounting/output centre, and physical calibration must match the recorded unit configuration.
+
 ```bash
 # Stable symlinks are preferred; AUTO scans ttyUSB* candidates.
 ros2 launch anello_ros_driver anello_driver.launch.py \
@@ -55,15 +65,17 @@ Data and command topic names are relative to the node namespace. Diagnostics and
 | Topic | Type | Contract |
 |---|---|---|
 | `imu/data_raw` | `sensor_msgs/Imu` | APIMU/APIM1 acceleration and selected gyro, SI units, FLU axes; orientation unavailable |
-| `imu/data` | `sensor_msgs/Imu` | APINS attitude in current geodetic ENU; body fields included only when fresh and in the same declared frame |
+| `imu/data` | `sensor_msgs/Imu` | APINS attitude in current geodetic ENU only with valid absolute heading; body fields included only when fresh and in the same declared frame |
 | `gps/fix` | `sensor_msgs/NavSatFix` | Primary GNSS receiver solution; 2D height is NaN; accuracy-derived covariance is approximated |
 | `ins/fix` | `sensor_msgs/NavSatFix` | Fused INS position; no-fix status and NaN coordinates when position is unavailable |
-| `ins/odometry` | `nav_msgs/Odometry` | Globally corrected INS solution: ECEF-derived local ENU pose, body-frame twist; emitted only with valid position |
-| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Stream ages, health, framing errors, transport failures, clock resets; status names identify the node namespace |
+| `ins/odometry` | `nav_msgs/Odometry` | Globally corrected INS solution: ECEF-derived local ENU pose, body-frame twist; emitted only with valid position and absolute heading |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Stream ages, accepted rates, ordering/gap counters, health reasons, framing errors, transport failures, clock-reset causes; status names identify the node namespace |
 | `ntrip_client/rtcm` | `rtcm_msgs/Message` | Checksum-verified corrections sent to the device data channel |
 | `ntrip_client/nmea` | `nmea_msgs/Sentence` | GGA generated from primary GNSS for the caster |
 
 Device-native topics are `anello/{imu_raw,im1,ins,gps,gps2,hdg,cov,ahrs,health}` using the matching `anello_interfaces` message definitions. Units remain documented in those messages: acceleration in g, rates and angles in degrees, MCU time in milliseconds; APIMU odometer time is seconds. IMU/INS/covariance/AHRS native frame identifiers have `_frd` appended to distinguish them from converted FLU output. They are not substitutes for standard ROS sensor messages. GPS2 identifies the secondary antenna separately.
+
+Unavailable standard gyro/acceleration vectors contain NaNs and have covariance element 0 set to -1. Heading-unavailable APINS states 0/1/8/9 use a neutral quaternion with `orientation_covariance[0]=-1`; states 1/9 still provide position on `ins/fix`. Within a clock epoch, duplicate/older samples are rejected per stream before refreshing health or cached measurements. See [validity and timing](doc/integration_guide.md#validity-and-timing) for reset and diagnostic semantics.
 
 APAHRS/subtype 8 is supported on `anello/ahrs`. Its yaw can be relative; it is not automatically presented as a north-referenced `imu/data` orientation. Legacy APIMU/APIM1 ASCII layouts without synchronization time remain supported. RTCM APIMU supports both old and current layouts; other binary layouts must match the documented structure exactly. Unknown extensions are rejected and counted.
 

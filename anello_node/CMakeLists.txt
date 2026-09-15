@@ -82,7 +82,7 @@ install(TARGETS anello_ros_driver_node
 )
 
 install(
-  DIRECTORY launch
+  DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}/
 )
 

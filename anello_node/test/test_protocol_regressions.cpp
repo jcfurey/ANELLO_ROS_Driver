@@ -138,6 +138,13 @@ TEST(FullProtocol, ResyncAndErrorAccounting) {
     EXPECT_EQ(out.size(),1u); EXPECT_EQ(parser.parse_failures,2u);
     EXPECT_EQ(decode(std::string(5000,'x')+ascii(imu)+"\r\n",parser).size(),1u);
 }
+TEST(FullProtocol, HeadingAndPositionValidityAreIndependent) {
+    for (double status : {0,1,2,3,4,8,9,10}) {
+        double ins[16]={}; ins[2]=status; ins[3]=37; ins[4]=-122;
+        EXPECT_EQ(ins_position_valid(ins),status!=0 && status!=8);
+        EXPECT_EQ(ins_heading_valid(ins),status==2 || status==3 || status==4 || status==10);
+    }
+}
 TEST(FullProtocol, BinaryLengthCrcAndCovariance) {
     rtcm_apins_t ins{}; ins.Status=4; ins.Latitude=370000000; ins.Longitude=-1220000000;
     StreamDecoder parser;
@@ -203,11 +210,52 @@ TEST(SampleState, HostDeviceAndSimulationClockResets) {
     EXPECT_FALSE(clock.update(5000,10000000000LL,0,false));
     EXPECT_FALSE(clock.update(5010,10010000000LL,10000000,false));
     EXPECT_TRUE(clock.update(5020,110020000000LL,20000000,false));
+    EXPECT_EQ(clock.reasons(),ClockDiscontinuity::ROS_CLOCK);
     EXPECT_TRUE(clock.update(5030,9000000000LL,30000000,false));
+    EXPECT_EQ(clock.reasons(),ClockDiscontinuity::ROS_CLOCK);
     EXPECT_TRUE(clock.update(1,9010000000LL,40000000,false));
+    EXPECT_EQ(clock.reasons(),ClockDiscontinuity::DEVICE_TIME);
     EXPECT_TRUE(clock.update(11,9020000000LL,50000000,true));
+    EXPECT_EQ(clock.reasons(),ClockDiscontinuity::CLOCK_MODE);
     EXPECT_FALSE(clock.update(21,9020000000LL,60000000,true));
+    EXPECT_EQ(clock.reasons(),ClockDiscontinuity::NONE);
     EXPECT_FALSE(clock.update(1021,9020000000LL,1060000000LL,true));
+}
+TEST(SampleState, RejectedEpochsDoNotRefreshStreamState) {
+    StreamContinuity imu, gps;
+    const auto start=SteadyClock::time_point{};
+    ASSERT_TRUE(imu.newer(1000)); imu.accept(1000,0.2,start);
+    EXPECT_FALSE(imu.newer(1000)); EXPECT_FALSE(imu.newer(990));
+    EXPECT_EQ(imu.accepted,1u); EXPECT_EQ(imu.duplicates,1u); EXPECT_EQ(imu.out_of_order,1u);
+    EXPECT_DOUBLE_EQ(imu.last.device_ms,1000);
+    EXPECT_DOUBLE_EQ(imu.last.age(start+std::chrono::seconds(1)),1.0);
+    ASSERT_TRUE(gps.newer(900)); gps.accept(900,0.2,start);
+    EXPECT_DOUBLE_EQ(gps.last.device_ms,900);
+    EXPECT_DOUBLE_EQ(imu.rate.rate_hz(start),0.2);
+}
+TEST(SampleState, GapCountersUseDeviceAndSteadyTimeAndSurviveReset) {
+    StreamContinuity stream;
+    const auto start=SteadyClock::time_point{};
+    stream.accept(1000,0.2,start);
+    stream.accept(1010,0.2,start+std::chrono::milliseconds(10));
+    EXPECT_EQ(stream.gaps,0u);
+    // Arrival gap despite nearly contiguous device epochs.
+    stream.accept(1020,0.2,start+std::chrono::seconds(1));
+    EXPECT_EQ(stream.gaps,1u);
+    // Device gap in a batch that arrives at once.
+    stream.accept(1500,0.2,start+std::chrono::seconds(1));
+    EXPECT_EQ(stream.gaps,2u);
+    EXPECT_DOUBLE_EQ(stream.max_interval_s,0.48);
+    stream.newer(1500); stream.newer(1490); ++stream.stamp_rejections;
+    stream.reset_epoch();
+    EXPECT_FALSE(stream.last.valid);
+    EXPECT_EQ(stream.accepted,4u); EXPECT_EQ(stream.gaps,2u);
+    EXPECT_EQ(stream.duplicates,1u); EXPECT_EQ(stream.out_of_order,1u);
+    EXPECT_EQ(stream.stamp_rejections,1u);
+    EXPECT_DOUBLE_EQ(stream.rate.rate_hz(start+std::chrono::seconds(1)),0);
+    EXPECT_DOUBLE_EQ(stream.last_interval_s,0); EXPECT_DOUBLE_EQ(stream.max_interval_s,0.48);
+    ASSERT_TRUE(stream.newer(0)); stream.accept(0,0.2,start+std::chrono::seconds(2));
+    EXPECT_EQ(stream.gaps,2u);
 }
 TEST(SampleState, IntegerHostEpochPreservesNanoseconds) {
     ClockTranslator clock;

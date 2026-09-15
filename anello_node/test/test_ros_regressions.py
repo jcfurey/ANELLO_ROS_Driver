@@ -13,7 +13,7 @@ import time
 import uuid
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
-from anello_interfaces.msg import APODO
+from anello_interfaces.msg import APHEALTH, APIMU, APODO
 from anello_interfaces.srv import CmdAndRsp
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from nav_msgs.msg import Odometry
@@ -55,7 +55,7 @@ def cov(ms):
 
 class Driver:
 
-    def __init__(self, tmp_path, overrides=None, launch=None, arguments=()):
+    def __init__(self, tmp_path, overrides=None, launch=None, arguments=(), base_params_file=None):
         self.context = rclpy.context.Context()
         rclpy.init(context=self.context)
         self.namespace = '/anello_test_' + uuid.uuid4().hex[:8]
@@ -63,13 +63,15 @@ class Driver:
         self.executor = SingleThreadedExecutor(context=self.context)
         self.executor.add_node(self.node)
         self.messages = defaultdict(list)
+        self.subscriptions = {}
         for key, msg_type, topic in (
                 ('imu', Imu, 'imu/data'), ('raw', Imu, 'imu/data_raw'),
                 ('odom', Odometry, 'ins/odometry'), ('fix', NavSatFix, 'ins/fix'),
                 ('gps', NavSatFix, 'gps/fix'), ('gga', Sentence, 'ntrip_client/nmea'),
+                ('health', APHEALTH, 'anello/health'), ('native_imu', APIMU, 'anello/imu_raw'),
                 ('diag', DiagnosticArray, '/diagnostics'),
                 ('tf', TFMessage, '/tf')):
-            self.node.create_subscription(
+            self.subscriptions[key] = self.node.create_subscription(
                 msg_type, topic, lambda msg, k=key: self.messages[k].append(msg),
                 qos_profile_sensor_data)
         self.clock_pub = self.node.create_publisher(Clock, '/clock', 10)
@@ -94,14 +96,26 @@ class Driver:
         else:
             executable = Path(get_package_prefix('anello_ros_driver')) / 'lib' / \
                 'anello_ros_driver' / 'anello_ros_driver_node'
-            command = [str(executable), '--ros-args', '-r', '__ns:=' + self.namespace,
-                       '--params-file', str(params_path)]
+            command = [str(executable), '--ros-args', '-r', '__ns:=' + self.namespace]
+            if base_params_file:
+                command += ['--params-file', str(base_params_file)]
+            command += ['--params-file', str(params_path)]
         self.process = subprocess.Popen(command, stdout=self.log, stderr=self.log,
                                         start_new_session=True)
         self.launch = launch
         try:
             self.spin(1.0)
             self.assert_alive()
+            if not launch:
+                # A fixed startup delay alone can lose the first best-effort
+                # sample while DDS is still matching endpoints.
+                deadline = time.monotonic() + 5.0
+                required = ('raw', 'imu', 'odom', 'fix', 'gps', 'health', 'native_imu')
+                while not all(self.subscriptions[key].get_publisher_count()
+                              for key in required):
+                    self.assert_alive()
+                    assert time.monotonic() < deadline, 'Driver publishers were not discovered'
+                    self.spin(0.05)
         except Exception:
             self.close()
             raise
@@ -126,6 +140,12 @@ class Driver:
         for _ in range(3):
             self.clock_pub.publish(message)
             self.spin(0.05)
+
+    def diagnostics(self):
+        statuses = [status for msg in self.messages['diag'] for status in msg.status
+                    if self.namespace in status.name and status.name.endswith('Device Status')]
+        assert statuses
+        return statuses[-1], {item.key: item.value for item in statuses[-1].values}
 
     def parameters(self, target, names):
         client = self.node.create_client(GetParameters, target + '/get_parameters')
@@ -198,6 +218,10 @@ def test_acquisition_and_wall_age_expire_imu_and_covariance(driver_factory):
     driver.spin(0.3)
     driver.send(ins(1520))
     assert driver.messages['imu'][-1].linear_acceleration_covariance[0] == -1
+    for field in ('angular_velocity', 'linear_acceleration'):
+        vector = getattr(driver.messages['imu'][-1], field)
+        assert all(math.isnan(getattr(vector, axis)) for axis in ('x', 'y', 'z'))
+    assert math.isnan(driver.messages['odom'][-1].twist.twist.angular.z)
     assert driver.messages['fix'][-1].position_covariance_type == 0
 
 
@@ -361,6 +385,11 @@ def test_saturated_fog_is_not_published_as_precise_rate(driver_factory):
     assert driver.messages['imu'][-1].angular_velocity_covariance[0] == -1
     assert driver.messages['imu'][-1].linear_acceleration_covariance[0] == 0
     assert driver.messages['odom'][-1].twist.covariance[35] == 1e6
+    for key in ('raw', 'imu'):
+        vector = driver.messages[key][-1].angular_velocity
+        assert all(math.isnan(getattr(vector, axis)) for axis in ('x', 'y', 'z'))
+        assert math.isfinite(driver.messages[key][-1].linear_acceleration.z)
+    assert math.isnan(driver.messages['odom'][-1].twist.twist.angular.z)
 
 
 def test_oversized_udp_datagram_is_dropped_as_a_whole(driver_factory):
@@ -634,3 +663,153 @@ def test_device_covariance_blocks_are_independently_available(driver_factory, mi
     assert (odom.twist.covariance[0] == 1e6) == (missing == 'velocity')
     assert (odom.pose.covariance[35] == 1e6) == (missing == 'attitude')
     assert (driver.messages['imu'][-1].orientation_covariance[8] == 0) == (missing == 'attitude')
+
+
+def test_absolute_heading_status_gates_orientation_odom_and_tf(driver_factory):
+    driver = driver_factory(overrides={
+        'publish_tf': True, 'expected_streams': ['ins'], 'diagnostic_updater.period': 0.05,
+        'covariance.device_convention': 'verified_m2_deg2_euler'})
+    odom_count = 0
+    # Interleave valid and unavailable heading, including loss after a fix.
+    for i, status in enumerate((0, 2, 1, 3, 8, 4, 9, 10, 1)):
+        ms = 1000 + 100 * i
+        driver.send(imu(ms), cov(ms), ins(ms, status=status))
+        heading = status in (2, 3, 4, 10)
+        output = driver.messages['imu'][-1]
+        assert (output.orientation_covariance[0] > 0) == heading
+        if not heading:
+            assert output.orientation_covariance[0] == -1
+            q = output.orientation
+            assert (q.x, q.y, q.z, q.w) == (0, 0, 0, 1)
+        assert math.isfinite(output.linear_acceleration.z)
+        assert (driver.messages['fix'][-1].status.status >= 0) == (status not in (0, 8))
+        odom_count += heading
+        assert len(driver.messages['odom']) == odom_count
+        assert len(driver.messages['tf']) == odom_count
+    diagnostic, values = driver.diagnostics()
+    assert diagnostic.level == DiagnosticStatus.WARN
+    assert diagnostic.message == 'INS absolute heading unavailable'
+    assert values['heading_health'] == 'unavailable'
+
+
+@pytest.mark.parametrize('fog', [True, False])
+def test_selected_gyro_output_health_and_diagnostics_agree(driver_factory, fog):
+    driver = driver_factory(overrides={
+        'use_fog_wz': fog, 'expected_streams': ['imu'], 'diagnostic_updater.period': 0.05})
+    # Keep fresh traffic through a health timer tick after filling the window.
+    for i in range(22):
+        mems = 250 + (0.05 if i % 2 else -0.05)
+        sample = imu(1000 + i * 100).replace(',1,2,3,4,', f',1,2,{mems},200,')
+        driver.send(sample, ins(1010 + i * 100), delay=0.07)
+    assert driver.messages['health'][-1].gyro_health_flag == (1 if fog else 0)
+    diagnostic, values = driver.diagnostics()
+    assert values['gyro_health'] == ('bad' if fog else 'good')
+    assert values['gyro_measurement_available'] == ('False' if fog else 'True')
+    assert diagnostic.level == (DiagnosticStatus.ERROR if fog else DiagnosticStatus.OK)
+    if fog:
+        assert 'range guard' in diagnostic.message
+    for key in ('raw', 'imu'):
+        output = driver.messages[key][-1]
+        assert math.isnan(output.angular_velocity.z) == fog
+        assert (output.angular_velocity_covariance[0] == -1) == fog
+        assert math.isfinite(output.linear_acceleration.z)
+    assert math.isnan(driver.messages['odom'][-1].twist.twist.angular.z) == fog
+    assert driver.messages['native_imu'][-1].wz_fog == 200
+    assert driver.messages['native_imu'][-1].wz == pytest.approx(mems)
+
+
+@pytest.mark.parametrize('timestamp_source', ['arrival', 'mcu'])
+def test_raw_ordering_precedes_cache_health_and_clock_updates(driver_factory, timestamp_source):
+    driver = driver_factory(overrides={
+        'timestamp_source': timestamp_source, 'expected_streams': ['imu'],
+        'diagnostic_updater.period': 0.05, 'imu_max_age': 0.5})
+    driver.send(imu(1000))
+    # Rejected samples would rail the gyro and fill its stuck-channel window.
+    bad = imu(1000, kind='APIM1').replace(',1,2,3,4,', ',1,2,250,200,')
+    driver.send(*([bad] * 12), imu(990))
+    assert len(driver.messages['raw']) == 1
+    driver.send(ins(1001))
+    assert driver.messages['imu'][-1].angular_velocity.z == pytest.approx(-math.radians(4))
+    # APIM1 and APIMU share ordering; newer coalesced samples are preserved.
+    driver.send(imu(1010, kind='APIM1'), imu(1020), imu(1030, kind='APIM1'))
+    assert len(driver.messages['raw']) == 4
+    stamps = [msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+              for msg in driver.messages['raw']]
+    assert all(a < b for a, b in zip(stamps, stamps[1:]))
+    _, values = driver.diagnostics()
+    assert int(values['imu_accepted_total']) == 4
+    assert int(values['imu_duplicate_epochs_total']) == 12
+    assert int(values['imu_out_of_order_epochs_total']) == 1
+    assert int(values['imu_stamp_rejections_total']) == 0
+    assert values['gyro_health'] == 'unavailable'  # Four samples, not a full window.
+    assert int(values['device_time_regressions_total']) == 0
+
+
+def test_duplicate_flood_cannot_refresh_measurements_or_stream_watchdog(driver_factory):
+    driver = driver_factory(overrides={
+        'expected_streams': ['imu'], 'stream_timeout': 0.2, 'diagnostic_updater.period': 0.05,
+        'covariance.device_convention': 'verified_m2_deg2_euler'})
+    driver.send(imu(1000), cov(1000))
+    for _ in range(5):
+        driver.send(imu(1000), cov(1000))
+    driver.send(ins(1010))
+    assert len(driver.messages['raw']) == 1
+    output = driver.messages['imu'][-1]
+    assert math.isnan(output.angular_velocity.z) and math.isnan(output.linear_acceleration.z)
+    assert output.angular_velocity_covariance[0] == -1
+    assert output.linear_acceleration_covariance[0] == -1
+    assert driver.messages['fix'][-1].position_covariance_type == 0
+    diagnostic, values = driver.diagnostics()
+    assert diagnostic.level == DiagnosticStatus.ERROR
+    assert 'imu' in diagnostic.message and float(values['imu_age_s']) > 0.2
+    assert int(values['imu_accepted_total']) == 1
+    assert int(values['imu_duplicate_epochs_total']) == 5
+    assert int(values['covariance_duplicate_epochs_total']) == 5
+    assert values['gyro_measurement_available'] == 'False'
+    # Resume after the wall-time gap: no device reboot, one gap event.
+    driver.send(imu(1020))
+    _, values = driver.diagnostics()
+    assert int(values['imu_gap_events_total']) == 1
+    assert int(values['device_time_regressions_total']) == 0
+
+
+def test_lagging_streams_and_rejected_covariance_and_ins_are_independent(driver_factory):
+    driver = driver_factory(overrides={
+        'expected_streams': ['ins'], 'diagnostic_updater.period': 0.05,
+        'covariance.device_convention': 'verified_m2_deg2_euler', 'covariance.max_age': 0.5})
+    gps = 'APGPS,{},1400000000000000000,37,-122,10,0,0,0,1,1,1,3,20,1,1,0'
+    driver.send(imu(1000), cov(1000), ins(1000), gps.format(900))
+    assert len(driver.messages['gps']) == 1
+    # Neither older covariance nor a repeated INS with different status may
+    # change accepted state. A later GNSS solution can still trail the IMU.
+    driver.send('APCOV,990,' + ','.join(['0'] * 18), ins(1000, status=0), gps.format(910))
+    assert len(driver.messages['imu']) == 1
+    assert len(driver.messages['gps']) == 2
+    _, values = driver.diagnostics()
+    assert values['heading_health'] == 'stable'
+    driver.send(ins(1010))
+    assert driver.messages['fix'][-1].position_covariance_type == 3
+    assert driver.messages['imu'][-1].orientation_covariance[0] > 0
+    _, values = driver.diagnostics()
+    assert int(values['ins_duplicate_epochs_total']) == 1
+    assert int(values['covariance_out_of_order_epochs_total']) == 1
+    assert int(values['gps_accepted_total']) == 2
+    assert int(values['device_time_regressions_total']) == 0
+
+
+def test_installed_example_yaml_loads_with_unknown_covariance(driver_factory):
+    path = Path(get_package_share_directory('anello_ros_driver'), 'config', 'anello_example.yaml')
+    assert path.is_file()
+    # Load the actual installed YAML through ROS; override only transport and
+    # timestamp source for this localhost fixture. Never open a physical port.
+    driver = driver_factory(base_params_file=path)
+    values = driver.parameters(driver.namespace + '/anello_ros_driver', [
+        'uart_config_port', 'command_mode', 'covariance.device_convention',
+        'covariance.angular_velocity', 'covariance.linear_acceleration'])
+    assert values[0].string_value == 'OFF' and values[1].string_value == 'read_only'
+    assert values[2].string_value == 'unknown'
+    assert list(values[3].double_array_value) == [0.0, 0.0, 0.0]
+    assert list(values[4].double_array_value) == [0.0, 0.0, 0.0]
+    driver.send(imu(1000), ins(1010))
+    assert list(driver.messages['raw'][-1].angular_velocity_covariance) == [0.0] * 9
+    assert list(driver.messages['imu'][-1].orientation_covariance) == [0.0] * 9

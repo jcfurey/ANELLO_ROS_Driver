@@ -52,6 +52,10 @@ bool ins_position_valid(const double *v) {
         std::isfinite(v[5]) && v[5]>=-1e6 && v[5]<=1e8;
 }
 
+bool ins_heading_valid(const double *v) {
+    return one_of(v[2], {2,3,4,10});
+}
+
 bool validate_packet(const DecodedPacket &p) {
     const auto &v=p.values;
     // Conversion to int64 nanoseconds must be bounded even after translation.

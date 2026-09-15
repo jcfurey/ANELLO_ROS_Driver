@@ -29,5 +29,6 @@ bool decode_ascii_frame(const std::string &frame, DecodedPacket &packet);
 bool decode_binary_frame(const a1buff_t &frame, DecodedPacket &packet);
 bool validate_packet(const DecodedPacket &packet);
 bool ins_position_valid(const double *ins);
+bool ins_heading_valid(const double *ins);
 }  // namespace anello
 #endif

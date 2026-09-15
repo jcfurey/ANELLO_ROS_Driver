@@ -682,7 +682,9 @@ private:
             else if (!stale_streams().empty())
                 stat.summary(diagnostic_updater::DiagnosticStatusWrapper::ERROR, "Missing or stale streams: "+stale_streams());
             else if (expects_stream("imu") && gyro > 0)
-                stat.summary(gyro==GYRO_BAD?diagnostic_updater::DiagnosticStatusWrapper::ERROR:diagnostic_updater::DiagnosticStatusWrapper::WARN, "Gyro unavailable or degraded");
+                stat.summary(gyro==GYRO_BAD?diagnostic_updater::DiagnosticStatusWrapper::ERROR:diagnostic_updater::DiagnosticStatusWrapper::WARN, health_msg_.get_gyro_reason());
+            else if (expects_stream("ins") && hdg==HEADING_UNAVAILABLE)
+                stat.summary(diagnostic_updater::DiagnosticStatusWrapper::WARN, "INS absolute heading unavailable");
             else if (err_pct >= 20.0)
                 stat.summary(diagnostic_updater::DiagnosticStatusWrapper::WARN, "High message error rate");
             else if ((!expects_stream("gps") || pos==0) && (!expects_stream("ins") || hdg==0))
@@ -696,9 +698,28 @@ private:
             }
             stat.add("covariance_convention_verified",use_device_cov_);
             stat.add("clock_resets",static_cast<int64_t>(clock_resets_));
+            stat.add("transport_generation_changes_total",static_cast<int64_t>(transport_changes_));
+            stat.add("device_time_regressions_total",static_cast<int64_t>(device_time_regressions_));
+            stat.add("ros_clock_changes_total",static_cast<int64_t>(ros_clock_changes_));
+            stat.add("clock_mode_changes_total",static_cast<int64_t>(clock_mode_changes_));
+            stat.add("last_measurement_reset_reason",last_reset_reason_);
+            stat.add("stream_gap_threshold_s",stream_timeout_);
+            for (auto &[name,continuity]:continuity_) {
+                stat.add(name+"_accepted_total",static_cast<int64_t>(continuity.accepted));
+                stat.add(name+"_duplicate_epochs_total",static_cast<int64_t>(continuity.duplicates));
+                stat.add(name+"_out_of_order_epochs_total",static_cast<int64_t>(continuity.out_of_order));
+                stat.add(name+"_stamp_rejections_total",static_cast<int64_t>(continuity.stamp_rejections));
+                stat.add(name+"_gap_events_total",static_cast<int64_t>(continuity.gaps));
+                stat.add(name+"_accepted_rate_hz_recent",continuity.rate.rate_hz());
+                stat.add(name+"_last_device_interval_s",continuity.last_interval_s);
+                stat.add(name+"_max_device_interval_s",continuity.max_interval_s);
+            }
             stat.add("position_accuracy", pos == 0 ? "cm" : (pos == 1 ? "m" : (pos==POSITION_UNAVAILABLE?"unavailable":">1m")));
             stat.add("heading_health", hdg == 0 ? "stable" : (hdg==HEADING_UNAVAILABLE?"unavailable":"unstable"));
             stat.add("gyro_health", gyro == 0 ? "good" : (gyro==GYRO_UNAVAILABLE?"unavailable":"bad"));
+            stat.add("gyro_reason",health_msg_.get_gyro_reason());
+            stat.add("gyro_measurement_available",imu_time_.valid && imu_time_.age()<=stream_timeout_ && gyro_available());
+            stat.add("gyro_health_source","driver heuristic and selected-channel range guard");
             stat.add("message_rate_hz_recent", rate_hz);
             stat.add("error_rate_percent_recent", err_pct);
             stat.add("messages_total", static_cast<int64_t>(rate_monitor_.total_ok));
@@ -763,7 +784,9 @@ private:
                 read_buf_.n_used = 0;
                 const auto generation=data_port_->generation();
                 if (generation!=data_generation_) {
-                    decoder_.reset(); reset_measurements(); clock_discontinuity_.reset(); data_generation_=generation;
+                    ++transport_changes_;
+                    decoder_.reset(); reset_measurements("transport generation changed");
+                    clock_discontinuity_.reset(); data_generation_=generation;
                 }
                 if (read_buf_.nbytes <= 0)
                     break;
@@ -798,24 +821,41 @@ private:
         return count;
     }
 
-    void reset_measurements() {
+    void reset_measurements(const std::string &reason) {
         imu_time_={}; cov_time_={}; streams_.clear();
         health_msg_=health_message();
         health_msg_.set_fog_enabled(use_fog_wz_);
         health_msg_.set_baseline(get_parameter("heading_baseline").as_double());
-        clock_translator_.reset(); ins_stamp_valid_=false; sim_stream_stamps_.clear();
+        clock_translator_.reset(); published_stamps_.clear();
+        for (auto &[name,continuity]:continuity_) continuity.reset_epoch();
+        last_reset_reason_=reason;
         ++clock_resets_;
         // Keep the fixed geographic anchor across reconnects/reboots; changing
         // its definition without changing the frame ID would move the world.
     }
 
-    rclcpp::Time stamp_from_mcu(double ms) {
+    void check_clock_epoch(double ms) {
         const auto steady_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
             SteadyClock::now().time_since_epoch()).count();
         const bool simulated=get_clock()->ros_time_is_active();
-        if (clock_discontinuity_.update(ms,read_buf_.stamp.nanoseconds(),steady_ns,simulated))
-            reset_measurements();
-        if (use_mcu_stamp_ && !simulated) {
+        if (clock_discontinuity_.update(ms,read_buf_.stamp.nanoseconds(),steady_ns,simulated)) {
+            const auto reasons=clock_discontinuity_.reasons();
+            std::string reason;
+            if (reasons & ClockDiscontinuity::DEVICE_TIME) {
+                ++device_time_regressions_; reason="device time regressed more than one second";
+            }
+            if (reasons & ClockDiscontinuity::ROS_CLOCK) {
+                ++ros_clock_changes_; reason+=(reason.empty()?"":"; ")+std::string("ROS clock changed");
+            }
+            if (reasons & ClockDiscontinuity::CLOCK_MODE) {
+                ++clock_mode_changes_; reason+=(reason.empty()?"":"; ")+std::string("clock mode changed");
+            }
+            reset_measurements(reason);
+        }
+    }
+
+    rclcpp::Time stamp_from_mcu(double ms) {
+        if (use_mcu_stamp_ && !get_clock()->ros_time_is_active()) {
             clock_translator_.update_ns(ms*1e-3,read_buf_.stamp.nanoseconds());
             if (clock_translator_.ready()) {
                 auto ns=clock_translator_.translate_ns(ms*1e-3);
@@ -825,20 +865,49 @@ private:
         return read_buf_.stamp;
     }
 
+    static const char *stream_name(MessageKind kind) {
+        switch (kind) {
+        case MessageKind::imu: case MessageKind::im1: return "imu";
+        case MessageKind::gps: return "gps";
+        case MessageKind::gps2: return "gps2";
+        case MessageKind::heading: return "heading";
+        case MessageKind::ins: return "ins";
+        case MessageKind::covariance: return "covariance";
+        case MessageKind::ahrs: return "ahrs";
+        }
+        return "unknown";
+    }
+
     void dispatch(const DecodedPacket &packet) {
         auto values=packet.values; double *v=values.data();
+        // Detect clock epochs before ordering, so a reboot can start again at
+        // zero. Within an epoch, rejected samples cannot train the translator,
+        // refresh caches, or enter the health window. APIMU/APIM1 share an epoch.
+        check_clock_epoch(v[0]);
+        const std::string name=stream_name(packet.kind);
+        auto &continuity=continuity_[name];
+        if (!continuity.newer(v[0])) return;
         auto stamp=stamp_from_mcu(v[0]);
         // /clock=0 is uninitialized. During a simulated-time pause the
         // navigation stream is suppressed instead of inventing advancing TF stamps.
-        if (get_clock()->ros_time_is_active()) {
-            if (stamp.nanoseconds()==0) return;
-            const auto previous=sim_stream_stamps_.find(packet.kind);
-            if (previous!=sim_stream_stamps_.end() && stamp.nanoseconds()<=previous->second) return;
-            sim_stream_stamps_[packet.kind]=stamp.nanoseconds();
+        const bool simulated=get_clock()->ros_time_is_active();
+        if (simulated && stamp.nanoseconds()==0) {
+            ++continuity.stamp_rejections; return;
         }
+        const auto previous=published_stamps_.find(name);
+        if (previous!=published_stamps_.end() && stamp.nanoseconds()<=previous->second.first) {
+            // Distinct acquisition epochs in one read can share arrival time.
+            // Preserve them with a one-nanosecond ordering adjustment. Never
+            // manufacture progress across reads or a paused simulated clock.
+            if (!simulated && read_buf_.stamp.nanoseconds()==previous->second.second)
+                stamp=rclcpp::Time(previous->second.first+1,stamp.get_clock_type());
+            else { ++continuity.stamp_rejections; return; }
+        }
+        published_stamps_[name]={stamp.nanoseconds(),read_buf_.stamp.nanoseconds()};
+        continuity.accept(v[0],stream_timeout_);
+        streams_[name].set(v[0]);
         switch (packet.kind) {
         case MessageKind::imu: case MessageKind::im1:
-            streams_["imu"].set(v[0]);
             health_msg_.add_imu_message(v); store_last_imu(v);
             if (publish_custom_) {
                 if (packet.kind==MessageKind::imu) publish_imu(v,pub_imu_,stamp,frame_imu_+"_frd");
@@ -847,40 +916,28 @@ private:
             publish_ros_imu_raw(v,stamp);
             break;
         case MessageKind::gps:
-            streams_["gps"].set(v[0]); health_msg_.add_gps_message(v);
+            health_msg_.add_gps_message(v);
             if (publish_custom_) publish_gps(v,pub_gps_,stamp,frame_gnss_);
             publish_gga(v,pub_gga_,stamp,frame_gnss_,leap_seconds_);
             publish_navsat_from_gps(v,stamp);
             break;
         case MessageKind::gps2:
-            streams_["gps2"].set(v[0]);
             if (publish_custom_) publish_gp2(v,pub_gp2_,stamp,frame_gnss2_);
             break;
         case MessageKind::heading:
-            streams_["heading"].set(v[0]); health_msg_.add_hdg_message(v);
+            health_msg_.add_hdg_message(v);
             if (publish_custom_) publish_hdr(v,pub_hdg_,stamp,frame_hdg_);
             break;
         case MessageKind::covariance:
-            streams_["covariance"].set(v[0]); store_last_cov(v);
+            store_last_cov(v);
             if (publish_custom_) publish_cov(v,pub_cov_,stamp,frame_ins_+"_frd");
             break;
         case MessageKind::ins:
-            streams_["ins"].set(v[0]); health_msg_.add_ins_message(v);
-            if (ins_stamp_valid_) {
-                if (v[0]<=last_ins_device_ms_) return;
-                if (stamp<=last_ins_stamp_) {
-                    if (!get_clock()->ros_time_is_active() && read_buf_.stamp==last_ins_arrival_stamp_)
-                        stamp=last_ins_stamp_+rclcpp::Duration(0,1);
-                    else return;
-                }
-            }
-            last_ins_device_ms_=v[0]; last_ins_arrival_stamp_=read_buf_.stamp;
-            last_ins_stamp_=stamp; ins_stamp_valid_=true;
+            health_msg_.add_ins_message(v);
             if (publish_custom_) publish_ins(v,pub_ins_,stamp,frame_ins_+"_frd");
             publish_ros_imu_and_nav(v,stamp);
             break;
         case MessageKind::ahrs: {
-            streams_["ahrs"].set(v[0]);
             if (publish_custom_) {
                 anello_interfaces::msg::APAHRS msg;
                 msg.header.stamp=stamp; msg.header.frame_id=frame_imu_+"_frd";
@@ -904,9 +961,8 @@ private:
         imu_cache_.wz_fog = val[7];
     }
 
-    bool gyro_available(const ImuCache &imu) const {
-        return health_msg_.get_gyro_status()!=GYRO_BAD &&
-            (!use_fog_wz_ || (std::abs(imu.wz)<180.0 && std::abs(imu.wz_fog)<200.0));
+    bool gyro_available() const {
+        return health_msg_.get_gyro_status()!=GYRO_BAD;
     }
 
     // Body-frame measurements converted FRD -> FLU and to SI units, shared
@@ -931,6 +987,10 @@ private:
             msg.angular_velocity_covariance[4 * i] = ang_vel_cov_[i];
             msg.linear_acceleration_covariance[4 * i] = lin_acc_cov_[i];
         }
+        if (!gyro_available()) {
+            msg.angular_velocity.x=msg.angular_velocity.y=msg.angular_velocity.z=NAN;
+            msg.angular_velocity_covariance[0]=-1;
+        }
     }
 
     // REP-145 imu/data_raw: accelerometer + gyroscope only, published at
@@ -950,7 +1010,6 @@ private:
         msg.orientation_covariance[0] = -1.0;
         fill_imu_body_measurements(msg, imu);
 
-        if (!gyro_available(imu)) msg.angular_velocity_covariance[0]=-1;
         check_accel_sign(imu);
 
         pub_ros_imu_raw_->publish(msg);
@@ -1073,16 +1132,23 @@ private:
         const bool fresh_imu=imu_time_.matches(ins[0],imu_max_age_) && frame_imu_==frame_ins_;
         const bool fresh_cov=covariance_fresh(ins[0]);
         const bool position_valid=ins_position_valid(ins);
+        const bool heading_valid=ins_heading_valid(ins);
         const auto q=ned_rpy_deg_to_enu_quat(ins[9],ins[10],ins[11]);
         sensor_msgs::msg::Imu imu;
         imu.header.stamp=stamp; imu.header.frame_id=frame_ins_;
-        imu.orientation.x=q.x(); imu.orientation.y=q.y(); imu.orientation.z=q.z(); imu.orientation.w=q.w();
+        imu.orientation.w=1.0;
+        if (heading_valid) {
+            imu.orientation.x=q.x(); imu.orientation.y=q.y(); imu.orientation.z=q.z(); imu.orientation.w=q.w();
+        } else imu.orientation_covariance[0]=-1;
         if (fresh_imu) {
             fill_imu_body_measurements(imu,imu_cache_);
-            if (!gyro_available(imu_cache_)) imu.angular_velocity_covariance[0]=-1;
         }
-        else { imu.angular_velocity_covariance[0]=-1; imu.linear_acceleration_covariance[0]=-1; }
-        if (fresh_cov && covariance_known(cov_cache_.orient)) {
+        else {
+            imu.angular_velocity.x=imu.angular_velocity.y=imu.angular_velocity.z=NAN;
+            imu.linear_acceleration.x=imu.linear_acceleration.y=imu.linear_acceleration.z=NAN;
+            imu.angular_velocity_covariance[0]=-1; imu.linear_acceleration_covariance[0]=-1;
+        }
+        if (heading_valid && fresh_cov && covariance_known(cov_cache_.orient)) {
             const auto c=orientation_covariance(ins);
             for (int r=0;r<3;++r) for (int col=0;col<3;++col) imu.orientation_covariance[3*r+col]=c[r][col];
         }
@@ -1103,7 +1169,7 @@ private:
             nav.position_covariance_type=sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN;
         }
         pub_ins_fix_->publish(nav);
-        if (position_valid) publish_odom(ins,stamp,q,fresh_imu,fresh_cov);
+        if (position_valid && heading_valid) publish_odom(ins,stamp,q,fresh_imu,fresh_cov);
     }
 
     void publish_odom(const double ins[], rclcpp::Time stamp,
@@ -1128,11 +1194,13 @@ private:
             odom.twist.covariance[7*i]=unknown_variance_;
         }
         const bool velocity_valid=std::isfinite(ins[6]) && std::isfinite(ins[7]) && std::isfinite(ins[8]);
+        odom.twist.twist.linear.x=odom.twist.twist.linear.y=odom.twist.twist.linear.z=NAN;
+        odom.twist.twist.angular.x=odom.twist.twist.angular.y=odom.twist.twist.angular.z=NAN;
         if (velocity_valid) {
             const auto velocity=body_to_current.transpose()*tf2::Vector3(ins[7],ins[6],-ins[8]);
             odom.twist.twist.linear.x=velocity.x(); odom.twist.twist.linear.y=velocity.y(); odom.twist.twist.linear.z=velocity.z();
         }
-        if (fresh_imu && gyro_available(imu_cache_)) {
+        if (fresh_imu && gyro_available()) {
             odom.twist.twist.angular.x=imu_cache_.wx*kDeg2Rad;
             odom.twist.twist.angular.y=-imu_cache_.wy*kDeg2Rad;
             odom.twist.twist.angular.z=-(use_fog_wz_?imu_cache_.wz_fog:imu_cache_.wz)*kDeg2Rad;
@@ -1288,6 +1356,9 @@ private:
     std::string frame_gnss2_;
     ClockDiscontinuity clock_discontinuity_;
     uint64_t clock_resets_=0;
+    uint64_t transport_changes_=0, device_time_regressions_=0, ros_clock_changes_=0, clock_mode_changes_=0;
+    std::string last_reset_reason_="none";
+    std::map<std::string,StreamContinuity> continuity_;
     LocalCartesian local_cartesian_;
 
     // One-shot accelerometer-sign self-check state. The device's at-rest
@@ -1299,11 +1370,8 @@ private:
     int accel_stationary_run_ = 0;     // consecutive stationary+level samples
     double accel_z_flu_sum_ = 0.0;     // sum of published FLU z over the run
 
-    // Per-INS ordering within the current ROS/device clock epoch.
-    rclcpp::Time last_ins_stamp_, last_ins_arrival_stamp_;
-    bool ins_stamp_valid_ = false;
-    double last_ins_device_ms_=0;
-    std::map<MessageKind,int64_t> sim_stream_stamps_;
+    // Published and arrival nanoseconds per logical stream in this clock epoch.
+    std::map<std::string,std::pair<int64_t,int64_t>> published_stamps_;
 
 
 };

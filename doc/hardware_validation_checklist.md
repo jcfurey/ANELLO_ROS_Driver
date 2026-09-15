@@ -18,6 +18,7 @@ Record the device model/serial, firmware version, parameter file, output rates/f
 - [ ] Confirm the selected FOG/MEMS channel and measure its variance at the actual output rate/filter bandwidth. FOG-disabled units use `use_fog_wz=false`. Check that enabled stuck/zero FOG output and saturation are not treated as precise angular measurements.
 - [ ] Collect enough stationary/dynamic data to assess health thresholds; the gyro window is ten samples and its limits are heuristics, not a statistical guarantee of zero false alarms.
 - [ ] Validate translated versus arrival stamps against a hardware reference where available. Expect residual minimum transport delay; the software clock filter is not PPS/PTP synchronization. Check reset behavior on device reboot and host-clock adjustments.
+- [ ] Record per-stream accepted rates, duplicate/older epochs, gap events, and reset causes. Compare gaps against device configuration; `stream_timeout` gap events are not exact missing-sample counts. Distinguish host-clock changes and transport reconnections from inferred device-time resets.
 
 ## Firmware covariance contract
 
@@ -32,6 +33,7 @@ Record the device model/serial, firmware version, parameter file, output rates/f
 - [ ] Confirm raw GNSS FixType and RTK status agree with `gps/fix`; time-only/no-fix must not appear as a valid fix. Two-dimensional height must be NaN.
 - [ ] Record the actual constellations and configure `gnss_service_mask`. Obtain the confidence definitions for Hacc/Vacc before relying on Hacc²/Vacc²; published covariance is marked approximated.
 - [ ] Check geographic east/north headings and turns against an independent reference. APINS attitude and relative APAHRS yaw have different heading contracts.
+- [ ] Exercise APINS heading acquisition/loss. States 0/1/8/9 must mark standard orientation unavailable and withhold odometry/TF; states 1/9 must retain valid `ins/fix` position. States 2/3/4/10 must restore orientation/pose without changing the established geographic anchor.
 - [ ] If using dual antennas, survey baseline length and set `heading_baseline`. Verify APHDG flags, heading, and reference point.
 - [ ] Exercise NTRIP with the real caster: startup outage, no first correction, link loss, server recovery, TLS verification, and VRS GGA requirements. Check NTRIP diagnostics and driver transmission counters as well as receipt on the ROS RTCM topic.
 - [ ] Measure normal correction byte/frame rates and odometer rate; check `device_input_rate_drops_total` and `device_input_rejections_total`. The configurable admission limits are driver policy, not measured firmware capacity. Evaluate long runs with valid inputs before accepting device stability.

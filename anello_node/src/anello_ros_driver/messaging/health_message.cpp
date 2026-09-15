@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cmath>
 #include "health_message.h"
+#include "protocol_decoder.h"
 
 // Gross disagreement threshold for the ten-sample MEMS/FOG window.
 #ifndef GYRO_DISCREPANCY_THRESHOLD
@@ -120,6 +121,8 @@ void health_message::add_imu_message(double *imu_msg)
     this->cur_imu_time = imu_msg[0];
     double wz = imu_msg[6];
     double wz_fog = imu_msg[7];
+    wz_mems_current_=wz;
+    wz_fog_current_=wz_fog;
 
     // MEMS path: every sample enters the window
     this->wz_mems_current_sum += wz;
@@ -178,7 +181,7 @@ void health_message::add_ins_message(double* ins_msg)
 { 
     this->ins_heading = ins_msg[11];
     double ins_status = ins_msg[2];
-    heading_available_=(ins_status==2 || ins_status==3 || ins_status==4 || ins_status==10);
+    heading_available_=anello::ins_heading_valid(ins_msg);
 
     double gps_ins_diff, hdg_ins_diff;
     this->get_current_diff(&gps_ins_diff, &hdg_ins_diff);
@@ -408,6 +411,9 @@ uint8_t health_message::get_heading_status() const
 
 uint8_t health_message::get_gyro_status() const 
 {
+    // Range availability is independent of whether the discrepancy window has
+    // filled or its high-rate comparison is disabled. All publishers use this.
+    if (gyro_range_exceeded()) return GYRO_BAD;
     if (!buffer_full || (fog_enabled_ && !fog_buffer_full)) return GYRO_UNAVAILABLE;
     uint8_t ret_val = GYRO_BAD;
 
@@ -417,6 +423,22 @@ uint8_t health_message::get_gyro_status() const
     }
 
     return ret_val;
+}
+
+bool health_message::gyro_range_exceeded() const
+{
+    return fog_enabled_ && (std::fabs(wz_mems_current_)>=FOG_SATURATION_GUARD_DPS ||
+                            std::fabs(wz_fog_current_)>=200.0);
+}
+
+const char *health_message::get_gyro_reason() const
+{
+    if (gyro_range_exceeded()) return "Selected optical gyro exceeds range guard";
+    switch (get_gyro_status()) {
+    case GYRO_BAD: return "Gyro consistency or stuck-channel check failed";
+    case GYRO_UNAVAILABLE: return "Gyro assessment window incomplete";
+    default: return "Selected gyro passes driver heuristic checks";
+    }
 }
 
 const char* health_message::get_csv_header()

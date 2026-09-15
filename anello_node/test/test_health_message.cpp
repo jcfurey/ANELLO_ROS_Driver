@@ -127,13 +127,42 @@ TEST(GyroHealth, FogDropoutSamplesDegradeHealth)
     EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
 }
 
-TEST(GyroHealth, FogSaturationIsNotAFault)
+TEST(GyroHealth, FogSaturationMakesSelectedMeasurementBad)
 {
     health_message h;
     // Yaw rate beyond the FOG's 200 deg/s range: MEMS tracks 250,
-    // FOG rails at 200 — large divergence, but expected.
+    // FOG rails at 200. This is not evidence of hardware failure, but
+    // the selected measurement must not be advertised as healthy.
     feed_imu(h, kFill, 250.0, 0.05, 200.0, 0.01);
+    EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
+    EXPECT_TRUE(h.gyro_range_exceeded());
+    EXPECT_STREQ(h.get_gyro_reason(), "Selected optical gyro exceeds range guard");
+    feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);
     EXPECT_EQ(h.get_gyro_status(), GYRO_GOOD);
+    EXPECT_FALSE(h.gyro_range_exceeded());
+}
+
+TEST(GyroHealth, RangeGuardAppliesImmediatelyInEitherDirection)
+{
+    for (double sign : {-1.0, 1.0}) {
+        for (bool optical : {false, true}) {
+            health_message h;
+            double msg[16] = {};
+            msg[optical ? 7 : 6] = sign * (optical ? 200.0 : 180.0);
+            h.add_imu_message(msg);
+            EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
+            EXPECT_TRUE(h.gyro_range_exceeded());
+        }
+    }
+}
+
+TEST(GyroHealth, OpticalRangeGuardDoesNotGateSelectedMems)
+{
+    health_message h;
+    h.set_fog_enabled(false);
+    feed_imu(h, kFill, 250.0, 0.05, 200.0, 0.0);
+    EXPECT_EQ(h.get_gyro_status(), GYRO_GOOD);
+    EXPECT_FALSE(h.gyro_range_exceeded());
 }
 
 TEST(HeadingHealth, MismatchAtSpeedTripsAfterStreak)

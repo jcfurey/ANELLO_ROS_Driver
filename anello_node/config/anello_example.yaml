@@ -1,0 +1,69 @@
+# ANELLO Ground INS / EVK example. Copy this file for each physical unit.
+# Record model, serial number, firmware, output rate/filter, and mounting here.
+# These are host-driver settings; loading this file does not configure the unit.
+/**:
+  ros__parameters:
+    # --- Connection ---
+    # Replace with the DATA port's stable symlink and match the existing baud.
+    com_type: "UART"
+    uart_data_port: "/dev/serial/by-id/REPLACE_WITH_ANELLO_DATA_PORT"
+    baud_rate: 230400
+    # Enable queries by replacing OFF with the distinct CONFIG port's symlink.
+    uart_config_port: "OFF"
+    command_mode: "read_only"
+    # For Ethernet, change com_type to ETH and match the unit's network setup:
+    # remote_ip: "192.168.1.111"
+    # local_data_port: 1111
+    # local_config_port: 2222
+    # local_odometer_port: 3333
+
+    # --- Streams and timing ---
+    # Ground IMU / raw-only bench: use [imu], or [imu, ahrs] with AHRS output.
+    # Add gps2, heading, or covariance only if those streams are enabled.
+    expected_streams: [imu, ins, gps]
+    stream_timeout: 2.0             # Seconds without a NEW accepted sample.
+    timestamp_source: "mcu"        # Device-to-host translation; no PPS/PTP claim.
+    use_sim_time: false
+    poll_interval_ms: 5
+    imu_max_age: 0.05               # Max device-time separation AND wall age.
+    covariance.max_age: 0.2
+    # imu_output_rate_hz is a legacy hint; it does not set rate or uncertainty.
+
+    # --- Body axes and sensing/output points ---
+    # Standard vectors are FLU/SI. Native topics retain vendor FRD/units.
+    # Same IDs assume raw IMU and firmware INS share axes AND output point.
+    # If output centres differ, use distinct IDs and measured static extrinsics;
+    # fused imu/data then omits body vectors rather than mixing different points.
+    frame_id.imu: "ins_link"
+    frame_id.ins: "ins_link"
+    frame_id.gnss: "gnss_link"
+    frame_id.gnss2: "gnss2_link"
+    frame_id.hdg: "gnss_link"
+    use_fog_wz: true                # false selects MEMS Z; no automatic fallback.
+    flip_accel_sign: false          # Establish with the six-face gravity test.
+    accel_sign_check_upright: false # Enable only for a known upright startup pose.
+
+    # --- Uncertainty: do not substitute datasheet guesses for unit calibration ---
+    # All zeros mean UNKNOWN uncertainty. Replace with measured [x,y,z]
+    # diagonal variances for this unit, selected gyro source, rate, and filters.
+    # Values use published FLU axes: gyro (rad/s)^2, acceleration (m/s^2)^2.
+    covariance.angular_velocity: [0.0, 0.0, 0.0]
+    covariance.linear_acceleration: [0.0, 0.0, 0.0]
+    # Enable verified_m2_deg2_euler only after verifying the firmware APCOV
+    # units, axes, Euler-error basis, and output centre (see integration guide).
+    covariance.device_convention: "unknown"
+    covariance.unknown_variance: 1000000.0 # Conservative odometry fallback.
+
+    # --- Navigation and diagnostics ---
+    # Robot estimator owns map -> odom -> base_link; URDF owns sensor mounts.
+    # Optional standalone TF requires valid position AND absolute heading.
+    publish_tf: false
+    tf_parent_frame: "anello_local"
+    tf_child_frame: "ins_link"      # Must equal frame_id.ins.
+    heading_baseline: 0.0           # Metres; 0 skips the dual-antenna length check.
+    gnss_service_mask: 0            # Unknown; set the actual constellation mask.
+    publish_custom_messages: true  # Retain raw values, INS status, and APHEALTH.
+
+    # Unavailable standard vectors are NaN with IMU covariance element 0 = -1.
+    # APINS 0/1/8/9 has no absolute orientation; 1/9 still provides ins/fix.
+    # Watch /diagnostics for freshness; retained anello/health is not a heartbeat.

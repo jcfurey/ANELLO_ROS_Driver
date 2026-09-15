@@ -47,6 +47,7 @@ enum GYRO_STATUS_FLAGS
 class health_message {
 private:
     bool fog_enabled_=true, gps_valid_=false, heading_available_=false;
+    double wz_mems_current_=0.0, wz_fog_current_=0.0;
     // imu message information
     double cur_imu_time;
     bool buffer_full;
@@ -111,6 +112,8 @@ public:
     uint8_t get_position_status() const;
     uint8_t get_heading_status() const;
     uint8_t get_gyro_status() const;
+    const char *get_gyro_reason() const;
+    bool gyro_range_exceeded() const;
 
     // debug functions
     void get_csv_line(double *llh, char *buffer, int len);
