@@ -18,36 +18,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-cmake_minimum_required(VERSION 3.14)
-project(anello_interfaces)
+"""Check per-file copyright and license notices with ament."""
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
+from ament_copyright.main import main
+import pytest
 
-find_package(ament_cmake REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
 
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/APIMU.msg"
-  "msg/APIM1.msg"
-  "msg/APINS.msg"
-  "msg/APAHRS.msg"
-  "msg/APGPS.msg"
-  "msg/APHDG.msg"
-  "msg/APODO.msg"
-  "msg/APHEALTH.msg"
-  "msg/APCOV.msg"
-  "srv/CmdAndRsp.srv"
-  "srv/InitHeading.srv"
-  "srv/UpdHeading.srv"
-  DEPENDENCIES std_msgs
-)
-
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  ament_lint_auto_find_test_dependencies()
-endif()
-
-ament_package()
+@pytest.mark.copyright
+@pytest.mark.linter
+def test_copyright():
+    assert main(argv=['.']) == 0

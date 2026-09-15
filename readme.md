@@ -22,6 +22,19 @@ The CI matrix covers Humble, Jazzy, Kilted, and Lyrical. The September 2026 reme
 
 The suites cover full ASCII/RTCM frames, numerical conversion, covariance and coordinate math, clock resets, pseudo-terminal reconnection/backpressure, simulated casters, and the installed driver/launch files on localhost. They do not establish physical sensor accuracy. `colcon.pkg` selects pytest for the Python package when `colcon-metadata` is installed; the explicit flag above also works without that extension. CI checks for missing or empty result files. An ament cppcheck run that skips checks is not static-analysis coverage.
 
+### ROS 2 style checks
+
+The C++ package runs the standard ament copyright, cpplint, uncrustify, cppcheck, Python, CMake, and XML checks. NTRIP uses the default ament Python style configuration and checks copyright notices. Cppcheck is explicitly configured for C++ and runs with a 300-second timeout even on versions ament otherwise skips.
+
+```bash
+colcon test --packages-select anello_ros_driver anello_interfaces \
+  --return-code-on-test-failure --ctest-args -L linter
+colcon test --packages-select ntrip_client --python-testing pytest \
+  --return-code-on-test-failure --pytest-args -m linter
+```
+
+To apply the ROS C++ formatter, run `ament_uncrustify --language CPP --reformat anello_node` from this repository. Keep formatting commits separate from behavior changes, and rebuild/run the regression suites afterward.
+
 ## Launch
 
 Copy and edit the installed [commented example YAML](anello_node/config/anello_example.yaml). Set the data-port symlink, baud rate, and streams to match the unit; the file includes frame, timing, and unknown-covariance defaults.

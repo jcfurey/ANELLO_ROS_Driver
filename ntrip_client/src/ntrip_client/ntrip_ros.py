@@ -1,22 +1,40 @@
 #!/usr/bin/env python3
+# Copyright (c) 2023 ANELLO Photonics
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
-import os
 import json
 import math
+import os
 import queue
 import time
 
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Header
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from rtcm_msgs.msg import Message as RTCM
 from nmea_msgs.msg import Sentence
-
 from ntrip_client.ntrip_client import NTRIPClient
 from ntrip_client.worker import NTRIPWorker
 from rcl_interfaces.msg import ParameterDescriptor
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rtcm_msgs.msg import Message as RTCM
+from std_msgs.msg import Header
 
 
 class NTRIPRos(Node):
@@ -26,7 +44,7 @@ class NTRIPRos(Node):
 
         # Debug from environment (optional)
         try:
-            self._debug = json.loads(os.environ.get("NTRIP_CLIENT_DEBUG", "false").lower())
+            self._debug = json.loads(os.environ.get('NTRIP_CLIENT_DEBUG', 'false').lower())
         except (json.JSONDecodeError, ValueError):
             self._debug = False
 

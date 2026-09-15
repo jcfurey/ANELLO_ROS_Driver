@@ -1,3 +1,23 @@
+# Copyright (c) 2023 ANELLO Photonics
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 cmake_minimum_required(VERSION 3.14)
 project(anello_ros_driver)
 
@@ -38,6 +58,7 @@ set(DRIVER_SOURCES
 
 # Shared library for component loading
 add_library(anello_ros_driver_component SHARED ${DRIVER_SOURCES})
+target_include_directories(anello_ros_driver_component PRIVATE src)
 target_link_libraries(anello_ros_driver_component PUBLIC
   rclcpp::rclcpp
   rclcpp_components::component
@@ -70,6 +91,7 @@ target_link_libraries(anello_ros_driver_node
   anello_ros_driver_component
   rclcpp::rclcpp
 )
+target_include_directories(anello_ros_driver_node PRIVATE src)
 
 install(TARGETS anello_ros_driver_component
   ARCHIVE DESTINATION lib
@@ -88,11 +110,8 @@ install(
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # Skip the pure style linters: the codebase predates them and a bulk
-  # reformat would obscure history. Functional linters still run.
-  set(ament_cmake_copyright_FOUND TRUE)
-  set(ament_cmake_cpplint_FOUND TRUE)
-  set(ament_cmake_uncrustify_FOUND TRUE)
+  set(ament_cmake_cppcheck_LANGUAGE c++)
+  set(ament_cmake_uncrustify_LANGUAGE C++)
   ament_lint_auto_find_test_dependencies()
 
   find_package(ament_cmake_pytest REQUIRED)
@@ -109,6 +128,14 @@ if(BUILD_TESTING)
     test/test_serial_reconnect.cpp
   )
   target_link_libraries(test_anello_decoding anello_ros_driver_component)
+  target_include_directories(test_anello_decoding PRIVATE src)
 endif()
 
 ament_package()
+
+if(BUILD_TESTING AND TEST cppcheck)
+  # Perform the registered check even for versions ament skips by default.
+  # CTest retains the check's 300-second timeout.
+  set_property(TEST cppcheck APPEND PROPERTY ENVIRONMENT
+    "AMENT_CPPCHECK_ALLOW_SLOW_VERSIONS=1")
+endif()

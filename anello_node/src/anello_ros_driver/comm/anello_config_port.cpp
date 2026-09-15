@@ -1,70 +1,107 @@
-#include "anello_config_port.h"
-#include "../bit_tools.h"
+// Copyright (c) 2023 ANELLO Photonics
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#include "anello_ros_driver/comm/anello_config_port.h"
+
 #include <algorithm>
 #include <filesystem>
+#include <string>
+#include <utility>
 #include <vector>
+
+#include "anello_ros_driver/bit_tools.h"
 anello_config_port::anello_config_port(const interface_config_t *config, std::string directory)
-    : config_(*config), ethernet_(config->remote_ip,2,config->local_config_port),
-      directory_(std::move(directory)) {}
-void anello_config_port::init() {
-    if (config_.type==ETH) { ethernet_.init(); confirmed_=true; }
-    else poll();
+: config_(*config), ethernet_(config->remote_ip, 2, config->local_config_port),
+  directory_(std::move(directory)) {}
+void anello_config_port::init()
+{
+  if (config_.type == ETH) {ethernet_.init(); confirmed_ = true;} else {poll();}
 }
-void anello_config_port::poll() {
-    if (config_.type==ETH || config_.config_port_name=="OFF") return;
-    const auto now=std::chrono::steady_clock::now();
-    if (confirmed_ && uart_.get_port_enabled()) {
+void anello_config_port::poll()
+{
+  if (config_.type == ETH || config_.config_port_name == "OFF") {return;}
+  const auto now = std::chrono::steady_clock::now();
+  if (confirmed_ && uart_.get_port_enabled()) {
         // Detect a hangup even with no commands or odometer input. These
         // unsolicited config bytes have no waiting service consumer.
-        char discard[512]; uart_.get_data(discard,sizeof(discard),0);
-        if (uart_.get_port_enabled()) return;
+    char discard[512]; uart_.get_data(discard, sizeof(discard), 0);
+    if (uart_.get_port_enabled()) {return;}
+  }
+  confirmed_ = false;
+  if (probing_) {
+    char response[256]; auto n = uart_.get_data(response, sizeof(response), 0);
+    probe_response_.append(response, n);
+    auto end = probe_response_.find("\r\n");
+    while (end != std::string::npos) {
+      auto line = probe_response_.substr(0, end + 2);
+      probe_response_.erase(0, end + 2);
+      if ((line.rfind("#APPNG,", 0) == 0 || line.rfind("#APPNG*",
+        0) == 0) && checksum(reinterpret_cast<const unsigned char *>(line.data()), line.size()))
+      {
+        confirmed_ = true; probing_ = false; return;
+      }
+      end = probe_response_.find("\r\n");
     }
-    confirmed_=false;
-    if (probing_) {
-        char response[256]; auto n=uart_.get_data(response,sizeof(response),0);
-        probe_response_.append(response,n);
-        auto end=probe_response_.find("\r\n");
-        while (end!=std::string::npos) {
-            auto line=probe_response_.substr(0,end+2);
-            probe_response_.erase(0,end+2);
-            if ((line.rfind("#APPNG,",0)==0 || line.rfind("#APPNG*",0)==0) && checksum(reinterpret_cast<const unsigned char *>(line.data()),line.size())) {
-                confirmed_=true; probing_=false; return;
-            }
-            end=probe_response_.find("\r\n");
-        }
-        if (now<deadline_ && probe_response_.size()<1024 && uart_.get_port_enabled()) return;
-        probing_=false; uart_.close_port();
+    if (now < deadline_ && probe_response_.size() < 1024 && uart_.get_port_enabled()) {return;}
+    probing_ = false; uart_.close_port();
+  }
+  if (now < deadline_) {return;}
+  deadline_ = now + std::chrono::milliseconds(500);
+  std::string name = config_.config_port_name;
+  if (name == "AUTO") {
+    std::vector<std::string> ports;
+    std::error_code error;
+    for (auto entry = std::filesystem::directory_iterator(directory_, error);
+      !error && entry != std::filesystem::directory_iterator{}; entry.increment(error))
+    {
+      if (entry->path().filename().string().rfind(PORT_PREFIX, 0) == 0) {
+        ports.push_back(entry->path());
+      }
     }
-    if (now<deadline_) return;
-    deadline_=now+std::chrono::milliseconds(500);
-    std::string name=config_.config_port_name;
-    if (name=="AUTO") {
-        std::vector<std::string> ports;
-        std::error_code error;
-        for (auto entry=std::filesystem::directory_iterator(directory_,error);
-             !error && entry!=std::filesystem::directory_iterator{}; entry.increment(error))
-            if (entry->path().filename().string().rfind(PORT_PREFIX,0)==0) ports.push_back(entry->path());
-        if (error) return;  // a directory can disappear or fail during a rescan
-        std::sort(ports.rbegin(),ports.rend());
-        if (ports.empty()) return;
-        name=ports[scan_index_++%ports.size()];
-    }
-    try {
-        uart_.init(name,config_.baud_rate);
-        if (config_.config_port_name=="AUTO") {
-            probe_response_.clear(); probing_=uart_.write_data("#APPNG*48\r\n",11);
-            if (!probing_) uart_.close_port();
-        } else confirmed_=true;
-    } catch (const std::exception &) { uart_.close_port(); }
+    if (error) {return;}  // a directory can disappear or fail during a rescan
+    std::sort(ports.rbegin(), ports.rend());
+    if (ports.empty()) {return;}
+    name = ports[scan_index_++ % ports.size()];
+  }
+  try {
+    uart_.init(name, config_.baud_rate);
+    if (config_.config_port_name == "AUTO") {
+      probe_response_.clear(); probing_ = uart_.write_data("#APPNG*48\r\n", 11);
+      if (!probing_) {uart_.close_port();}
+    } else {confirmed_ = true;}
+  } catch (const std::exception &) {
+    uart_.close_port();
+  }
 }
-size_t anello_config_port::get_data(char *buf, size_t size, int timeout_ms) {
-    if (!confirmed_) return 0;
-    return config_.type==ETH?ethernet_.get_data(buf,size,timeout_ms):uart_.get_data(buf,size,timeout_ms);
+size_t anello_config_port::get_data(char *buf, size_t size, int timeout_ms)
+{
+  if (!confirmed_) {return 0;}
+  return config_.type == ETH ? ethernet_.get_data(buf, size, timeout_ms) : uart_.get_data(buf, size,
+    timeout_ms);
 }
-bool anello_config_port::write_data(const char *buf, size_t size) {
-    if (!confirmed_) poll();
-    if (!confirmed_) return false;
-    const bool sent=config_.type==ETH?ethernet_.write_data(buf,size):uart_.write_data(buf,size);
-    if (!sent && config_.type==UART) confirmed_=false;
-    return sent;
+bool anello_config_port::write_data(const char *buf, size_t size)
+{
+  if (!confirmed_) {poll();}
+  if (!confirmed_) {return false;}
+  const bool sent = config_.type == ETH ? ethernet_.write_data(buf, size) : uart_.write_data(buf,
+    size);
+  if (!sent && config_.type == UART) {confirmed_ = false;}
+  return sent;
 }

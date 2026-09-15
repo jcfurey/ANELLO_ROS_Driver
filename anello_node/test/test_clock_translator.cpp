@@ -1,17 +1,36 @@
+// Copyright (c) 2023 ANELLO Photonics
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 // Tests for the Olson minimum-offset device->host clock translator.
 
 #include <gtest/gtest.h>
 
-#include "../src/anello_ros_driver/clock_translator.h"
-
+#include "anello_ros_driver/clock_translator.h"
 using anello::ClockTranslator;
 
 TEST(ClockTranslator, NotReadyUntilWarmedUp)
 {
     ClockTranslator ct;
     for (int i = 0; i < ClockTranslator::kWarmupSamples - 1; ++i) {
-        ct.update(i * 0.01, 100.0 + i * 0.01);
-        EXPECT_FALSE(ct.ready());
+    ct.update(i * 0.01, 100.0 + i * 0.01);
+    EXPECT_FALSE(ct.ready());
     }
     ct.update(1.0, 101.0);
     EXPECT_TRUE(ct.ready());
@@ -24,9 +43,9 @@ TEST(ClockTranslator, TracksMinimumOffsetThroughJitter)
     // packet arrives with only 5 ms latency — the translator must lock
     // to (close to) the minimum.
     for (int i = 0; i < 200; ++i) {
-        const double device = i * 0.01;
-        const double latency = (i == 50) ? 0.005 : 0.005 + 0.045 * ((i * 7) % 10) / 10.0;
-        ct.update(device, 100.0 + device + latency);
+    const double device = i * 0.01;
+    const double latency = (i == 50) ? 0.005 : 0.005 + 0.045 * ((i * 7) % 10) / 10.0;
+    ct.update(device, 100.0 + device + latency);
     }
     ASSERT_TRUE(ct.ready());
     // translate(device) - (100 + device) == captured min latency, which
@@ -40,8 +59,8 @@ TEST(ClockTranslator, TranslatedTimesPreserveDeviceDeltas)
 {
     ClockTranslator ct;
     for (int i = 0; i < 150; ++i) {
-        const double device = i * 0.01;
-        ct.update(device, 50.0 + device + 0.002 + 0.001 * (i % 3));
+    const double device = i * 0.01;
+    ct.update(device, 50.0 + device + 0.002 + 0.001 * (i % 3));
     }
     ASSERT_TRUE(ct.ready());
     // dt between translated stamps equals dt between device times,
@@ -54,7 +73,7 @@ TEST(ClockTranslator, ResetsWhenDeviceTimeGoesBackwards)
 {
     ClockTranslator ct;
     for (int i = 0; i < 150; ++i) {
-        ct.update(i * 0.01, 100.0 + i * 0.01 + 0.002);
+    ct.update(i * 0.01, 100.0 + i * 0.01 + 0.002);
     }
     ASSERT_TRUE(ct.ready());
 
@@ -64,7 +83,7 @@ TEST(ClockTranslator, ResetsWhenDeviceTimeGoesBackwards)
 
     // After re-warm-up the translator follows the new timeline
     for (int i = 1; i <= ClockTranslator::kWarmupSamples; ++i) {
-        ct.update(i * 0.01, 103.0 + i * 0.01 + 0.002);
+    ct.update(i * 0.01, 103.0 + i * 0.01 + 0.002);
     }
     EXPECT_TRUE(ct.ready());
     EXPECT_NEAR(ct.translate(1.0), 104.002, 1e-3);
@@ -78,12 +97,12 @@ TEST(ClockTranslator, ToleratesCrossStreamBackwardsSteps)
     // computation latency). These small backwards steps must not reset
     // the warm-up — only a reboot-scale jump may.
     for (int i = 0; i < 300; ++i) {
-        const double device = i * 0.01;
-        ct.update(device, 100.0 + device + 0.002);
-        if (i > 10 && i % 25 == 0) {
-            const double gnss_device = device - 0.1;  // lags the IMU stream
-            ct.update(gnss_device, 100.0 + device + 0.003);
-        }
+    const double device = i * 0.01;
+    ct.update(device, 100.0 + device + 0.002);
+    if (i > 10 && i % 25 == 0) {
+      const double gnss_device = device - 0.1;        // lags the IMU stream
+      ct.update(gnss_device, 100.0 + device + 0.003);
+    }
     }
     ASSERT_TRUE(ct.ready());
     // The lagged messages must also not corrupt the learned offset.
@@ -102,7 +121,7 @@ TEST(ClockTranslator, DriftCreepStaysBounded)
     // Constant 10 ms latency for 100 s of device time: the offset may
     // only creep up by kDriftBound per second of device time.
     for (int i = 0; i < 10000; ++i) {
-        ct.update(i * 0.01, 200.0 + i * 0.01 + 0.010);
+    ct.update(i * 0.01, 200.0 + i * 0.01 + 0.010);
     }
     const double residual = ct.translate(100.0) - 300.0;
     EXPECT_GE(residual, 0.0);

@@ -1,5 +1,25 @@
-#ifndef HEALTH_MESSAGE_H
-#define HEALTH_MESSAGE_H
+// Copyright (c) 2023 ANELLO Photonics
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#ifndef ANELLO_ROS_DRIVER__MESSAGING__HEALTH_MESSAGE_H_
+#define ANELLO_ROS_DRIVER__MESSAGING__HEALTH_MESSAGE_H_
 /********************************************************************************
  * File Name:   health_message.h
  * Description: Declaration of the health_message class
@@ -11,113 +31,112 @@
  *
  * Note: This class is used to store the health status of the system. It is
  *       updated by the health_message class and read by the main thread. Finally,
- *       it is published by the main thread.       
+ *       it is published by the main thread.
  ********************************************************************************/
 
 #include <cstdint>
-
 #ifndef IMU_MOVING_AVERAGE_SIZE
 #define IMU_MOVING_AVERAGE_SIZE 10
 #endif
 
 
-
 enum POSITION_STATUS_FLAGS
 {
-    CM_LEVEL_ACCURACY,
-    SUB_METER_LEVEL_ACCURACY,
-    GPS_ACC_POOR,
-    POSITION_UNAVAILABLE
+  CM_LEVEL_ACCURACY,
+  SUB_METER_LEVEL_ACCURACY,
+  GPS_ACC_POOR,
+  POSITION_UNAVAILABLE
 };
 
 enum HEADING_STATUS_FLAGS
 {
-    HEADING_STABLE,
-    HEADING_UNSTABLE,
-    HEADING_UNAVAILABLE
+  HEADING_STABLE,
+  HEADING_UNSTABLE,
+  HEADING_UNAVAILABLE
 };
 
 enum GYRO_STATUS_FLAGS
 {
-    GYRO_GOOD,
-    GYRO_BAD,
-    GYRO_UNAVAILABLE
+  GYRO_GOOD,
+  GYRO_BAD,
+  GYRO_UNAVAILABLE
 };
 
 class health_message {
 private:
-    bool fog_enabled_=true, gps_valid_=false, heading_available_=false;
-    double wz_mems_current_=0.0, wz_fog_current_=0.0;
+  bool fog_enabled_ = true, gps_valid_ = false, heading_available_ = false;
+  double wz_mems_current_ = 0.0, wz_fog_current_ = 0.0;
     // imu message information
-    double cur_imu_time;
-    bool buffer_full;
-    double wz_mems_circular_buffer[IMU_MOVING_AVERAGE_SIZE];
-    double wz_fog_circular_buffer[IMU_MOVING_AVERAGE_SIZE];
-    double wz_mems_current_sum;
-    double wz_fog_current_sum;
-    double wz_mems_moving_average;
-    double wz_fog_moving_average;
+  double cur_imu_time;
+  bool buffer_full;
+  double wz_mems_circular_buffer[IMU_MOVING_AVERAGE_SIZE];
+  double wz_fog_circular_buffer[IMU_MOVING_AVERAGE_SIZE];
+  double wz_mems_current_sum;
+  double wz_fog_current_sum;
+  double wz_mems_moving_average;
+  double wz_fog_moving_average;
 
-    double wz_fog_std_dev;
-    double wz_mems_std_dev;
+  double wz_fog_std_dev;
+  double wz_mems_std_dev;
 
-    int circular_buffer_index;
+  int circular_buffer_index;
 
     // Separate window allows explicit FOG disabling.
-    bool fog_buffer_full;
-    int fog_circular_buffer_index;
+  bool fog_buffer_full;
+  int fog_circular_buffer_index;
 
     // ins message information
-    double ins_heading;
+  double ins_heading;
 
     // gps message information
-    double gps_heading;
-    double gps_heading_acc;
-    double gps_hacc;
-    double rtk_status;
-    
-    bool gps_read_flag;
-    bool hdg_read_flag;
-    int gps_ins_mismatch_streak;
-    int hdg_ins_mismatch_streak;
+  double gps_heading;
+  double gps_heading_acc;
+  double gps_hacc;
+  double rtk_status;
+
+  bool gps_read_flag;
+  bool hdg_read_flag;
+  int gps_ins_mismatch_streak;
+  int hdg_ins_mismatch_streak;
 
 
     // hdg message information
-    double hdg_heading;
-    double hdg_heading_acc;
-    double hdg_baseline;
+  double hdg_heading;
+  double hdg_heading_acc;
+  double hdg_baseline;
 
-    double configured_baseline;
+  double configured_baseline;
 
     // helper functions
-    bool has_rtk_fix() const;
-    bool has_gyro_discrepancy() const;
-    bool has_good_gps_accuracy() const;
-    bool is_not_rotating() const;
+  bool has_rtk_fix() const;
+  bool has_gyro_discrepancy() const;
+  bool has_good_gps_accuracy() const;
+  bool is_not_rotating() const;
 
-    void get_current_diff(double *gps_diff, double *hdg_diff);
+  void get_current_diff(double *gps_diff, double *hdg_diff);
 
-    bool is_single_antenna_heading_valid();
-    bool is_baseline_correct();
+  bool is_single_antenna_heading_valid();
+  bool is_baseline_correct();
+
 public:
-    health_message();
+  health_message();
 
-    void add_imu_message(double *data);
-    void add_ins_message(double *data);
-    void add_gps_message(double *data);
-    void add_hdg_message(double *data);
-    void set_baseline(double baseline);
-    void set_fog_enabled(bool enabled) { fog_enabled_=enabled; }
+  void add_imu_message(double *data);
+  void add_ins_message(double *data);
+  void add_gps_message(double *data);
+  void add_hdg_message(double *data);
+  void set_baseline(double baseline);
+  void set_fog_enabled(bool enabled) {fog_enabled_ = enabled;}
 
-    uint8_t get_position_status() const;
-    uint8_t get_heading_status() const;
-    uint8_t get_gyro_status() const;
-    const char *get_gyro_reason() const;
-    bool gyro_range_exceeded() const;
+  uint8_t get_position_status() const;
+  uint8_t get_heading_status() const;
+  uint8_t get_gyro_status() const;
+  const char * get_gyro_reason() const;
+  bool gyro_range_exceeded() const;
 
     // debug functions
-    void get_csv_line(double *llh, char *buffer, int len);
-    const char *get_csv_header();
+  void get_csv_line(double *llh, char *buffer, int len);
+  const char * get_csv_header();
 };
 
-#endif // HEALTH_MESSAGE_H
+#endif  // ANELLO_ROS_DRIVER__MESSAGING__HEALTH_MESSAGE_H_

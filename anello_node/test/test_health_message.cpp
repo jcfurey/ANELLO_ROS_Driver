@@ -1,3 +1,23 @@
+// Copyright (c) 2023 ANELLO Photonics
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 // Health monitor behavior tests with synthetic sensor streams:
 // stuck-channel detection, MEMS-vs-FOG discrepancy gating, the FOG
 // saturation guard, FOG-disabled handling, GPS heading speed gating,
@@ -8,58 +28,59 @@
 #include <cmath>
 #include <cstring>
 
-#include "../src/anello_ros_driver/messaging/health_message.h"
-
+#include "anello_ros_driver/messaging/health_message.h"
 namespace
 {
 constexpr int kFill = 3 * IMU_MOVING_AVERAGE_SIZE;  // enough to fill buffers
 
 // imu_msg layout: [0]=mcu_time, [6]=wz (MEMS), [7]=wz_fog
-void feed_imu(health_message &h, int n, double wz_mean, double wz_noise,
-              double fog_mean, double fog_noise)
+void feed_imu(
+  health_message & h, int n, double wz_mean, double wz_noise,
+  double fog_mean, double fog_noise)
 {
-    double msg[16] = {};
-    for (int i = 0; i < n; ++i) {
-        const double s = (i % 2 == 0) ? 1.0 : -1.0;  // +/- alternation
-        msg[0] = 10.0 * i;
-        msg[6] = wz_mean + s * wz_noise;
-        msg[7] = fog_mean + s * fog_noise;
-        h.add_imu_message(msg);
-    }
+  double msg[16] = {};
+  for (int i = 0; i < n; ++i) {
+    const double s = (i % 2 == 0) ? 1.0 : -1.0;      // +/- alternation
+    msg[0] = 10.0 * i;
+    msg[6] = wz_mean + s * wz_noise;
+    msg[7] = fog_mean + s * fog_noise;
+    h.add_imu_message(msg);
+  }
 }
 
 // gps_msg layout: [6]=speed, [7]=heading, [8]=hacc, [14]=heading_acc,
 // [15]=rtk
-void feed_gps(health_message &h, double speed, double heading,
-              double heading_acc)
+void feed_gps(
+  health_message & h, double speed, double heading,
+  double heading_acc)
 {
-    double msg[16] = {};
-    msg[6] = speed;
-    msg[7] = heading;
-    msg[11] = 3;
-    msg[8] = 0.5;
-    msg[14] = heading_acc;
-    h.add_gps_message(msg);
+  double msg[16] = {};
+  msg[6] = speed;
+  msg[7] = heading;
+  msg[11] = 3;
+  msg[8] = 0.5;
+  msg[14] = heading_acc;
+  h.add_gps_message(msg);
 }
 
 // ins_msg layout: [2]=status, [11]=heading
-void feed_ins(health_message &h, double heading, double status = 2.0)
+void feed_ins(health_message & h, double heading, double status = 2.0)
 {
-    double msg[16] = {};
-    msg[2] = status;
-    msg[11] = heading;
-    h.add_ins_message(msg);
+  double msg[16] = {};
+  msg[2] = status;
+  msg[11] = heading;
+  h.add_ins_message(msg);
 }
 
 // hdg_msg layout: [5]=baseline, [6]=heading, [8]=heading_acc, [9]=flags
-void feed_hdg(health_message &h, double heading, uint16_t flags)
+void feed_hdg(health_message & h, double heading, uint16_t flags)
 {
-    double msg[16] = {};
-    msg[5] = 1.0;
-    msg[6] = heading;
-    msg[8] = 0.1;
-    msg[9] = static_cast<double>(flags);
-    h.add_hdg_message(msg);
+  double msg[16] = {};
+  msg[5] = 1.0;
+  msg[6] = heading;
+  msg[8] = 0.1;
+  msg[9] = static_cast<double>(flags);
+  h.add_hdg_message(msg);
 }
 
 constexpr uint16_t kHdgValidFlags = (1 << 0) | (1 << 2) | (1 << 8);
@@ -118,11 +139,11 @@ TEST(GyroHealth, FogDropoutSamplesDegradeHealth)
     // An enabled FOG intermittently returning zero must degrade health.
     double msg[16] = {};
     for (int i = 0; i < kFill; ++i) {
-        const double s = (i % 2 == 0) ? 1.0 : -1.0;
-        msg[0] = 10.0 * i;
-        msg[6] = 5.0 + s * 0.05;
-        msg[7] = (i % 3 == 0) ? 0.0 : 5.0 + s * 0.01;
-        h.add_imu_message(msg);
+    const double s = (i % 2 == 0) ? 1.0 : -1.0;
+    msg[0] = 10.0 * i;
+    msg[6] = 5.0 + s * 0.05;
+    msg[7] = (i % 3 == 0) ? 0.0 : 5.0 + s * 0.01;
+    h.add_imu_message(msg);
     }
     EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
 }
@@ -145,14 +166,14 @@ TEST(GyroHealth, FogSaturationMakesSelectedMeasurementBad)
 TEST(GyroHealth, RangeGuardAppliesImmediatelyInEitherDirection)
 {
     for (double sign : {-1.0, 1.0}) {
-        for (bool optical : {false, true}) {
-            health_message h;
-            double msg[16] = {};
-            msg[optical ? 7 : 6] = sign * (optical ? 200.0 : 180.0);
-            h.add_imu_message(msg);
-            EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
-            EXPECT_TRUE(h.gyro_range_exceeded());
-        }
+    for (bool optical : {false, true}) {
+      health_message h;
+      double msg[16] = {};
+      msg[optical ? 7 : 6] = sign * (optical ? 200.0 : 180.0);
+      h.add_imu_message(msg);
+      EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
+      EXPECT_TRUE(h.gyro_range_exceeded());
+    }
     }
 }
 
@@ -171,8 +192,8 @@ TEST(HeadingHealth, MismatchAtSpeedTripsAfterStreak)
     feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);  // sane gyro context
 
     for (int i = 0; i < 5; ++i) {
-        feed_gps(h, 5.0, 90.0, 0.5);   // moving at 5 m/s, accurate heading
-        feed_ins(h, 0.0);              // INS disagrees by 90 deg
+    feed_gps(h, 5.0, 90.0, 0.5);       // moving at 5 m/s, accurate heading
+    feed_ins(h, 0.0);                  // INS disagrees by 90 deg
     }
     EXPECT_EQ(h.get_heading_status(), HEADING_UNSTABLE);
 }
@@ -185,8 +206,8 @@ TEST(HeadingHealth, SlowSpeedComparisonsAreGated)
     // Same 90-deg disagreement, but below the 2 m/s speed gate:
     // course-over-ground is meaningless, so no streak may accumulate.
     for (int i = 0; i < 10; ++i) {
-        feed_gps(h, 0.5, 90.0, 0.5);
-        feed_ins(h, 0.0);
+    feed_gps(h, 0.5, 90.0, 0.5);
+    feed_ins(h, 0.0);
     }
     EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
 }
@@ -197,8 +218,8 @@ TEST(HeadingHealth, AgreementAtSpeedStaysStable)
     feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);
 
     for (int i = 0; i < 10; ++i) {
-        feed_gps(h, 5.0, 90.0, 0.5);
-        feed_ins(h, 89.0);  // within the 3 deg threshold
+    feed_gps(h, 5.0, 90.0, 0.5);
+    feed_ins(h, 89.0);      // within the 3 deg threshold
     }
     EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
 }
@@ -215,8 +236,8 @@ TEST(HeadingHealth, FogDisabledRotationStillGatesComparisons)
     feed_imu(h, kFill, 15.0, 0.05, 0.0, 0.0);
 
     for (int i = 0; i < 10; ++i) {
-        feed_gps(h, 5.0, 90.0, 0.5);
-        feed_ins(h, 0.0);
+    feed_gps(h, 5.0, 90.0, 0.5);
+    feed_ins(h, 0.0);
     }
     EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
 }
@@ -230,8 +251,8 @@ TEST(HeadingHealth, FogDisabledStationaryMismatchStillTrips)
     feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.0);
 
     for (int i = 0; i < 5; ++i) {
-        feed_gps(h, 5.0, 90.0, 0.5);
-        feed_ins(h, 0.0);
+    feed_gps(h, 5.0, 90.0, 0.5);
+    feed_ins(h, 0.0);
     }
     EXPECT_EQ(h.get_heading_status(), HEADING_UNSTABLE);
 }
@@ -242,8 +263,8 @@ TEST(HeadingHealth, DualAntennaMismatchWithValidFlagsTrips)
     feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);
 
     for (int i = 0; i < 5; ++i) {
-        feed_hdg(h, 90.0, kHdgValidFlags);
-        feed_ins(h, 0.0);
+    feed_hdg(h, 90.0, kHdgValidFlags);
+    feed_ins(h, 0.0);
     }
     EXPECT_EQ(h.get_heading_status(), HEADING_UNSTABLE);
 }
@@ -256,8 +277,8 @@ TEST(HeadingHealth, InvalidHdgFlagsAreIgnored)
     // Heading-valid bit (8) missing: epochs must not count
     const uint16_t no_heading_valid = (1 << 0) | (1 << 2);
     for (int i = 0; i < 10; ++i) {
-        feed_hdg(h, 90.0, no_heading_valid);
-        feed_ins(h, 0.0);
+    feed_hdg(h, 90.0, no_heading_valid);
+    feed_ins(h, 0.0);
     }
     EXPECT_EQ(h.get_heading_status(), HEADING_STABLE);
 }
@@ -268,8 +289,8 @@ TEST(HeadingHealth, UninitializedInsResetsStreak)
     feed_imu(h, kFill, 0.0, 0.05, 0.0, 0.01);
 
     for (int i = 0; i < 3; ++i) {
-        feed_gps(h, 5.0, 90.0, 0.5);
-        feed_ins(h, 0.0);
+    feed_gps(h, 5.0, 90.0, 0.5);
+    feed_ins(h, 0.0);
     }
     // INS drops to attitude-only before the streak reaches 4
     feed_gps(h, 5.0, 90.0, 0.5);
@@ -301,15 +322,15 @@ TEST(PositionHealth, RtkFixedIsCmLevel)
 
 TEST(GyroHealth, WarmupIsUnavailableAndZeroDropoutCannotStayHealthy) {
     health_message h;
-    EXPECT_EQ(h.get_gyro_status(),GYRO_UNAVAILABLE);
-    feed_imu(h,kFill,0,0.05,0,0.01);
-    ASSERT_EQ(h.get_gyro_status(),GYRO_GOOD);
-    feed_imu(h,1000,0,0.05,0,0);
-    EXPECT_EQ(h.get_gyro_status(),GYRO_BAD);
+    EXPECT_EQ(h.get_gyro_status(), GYRO_UNAVAILABLE);
+    feed_imu(h, kFill, 0, 0.05, 0, 0.01);
+    ASSERT_EQ(h.get_gyro_status(), GYRO_GOOD);
+    feed_imu(h, 1000, 0, 0.05, 0, 0);
+    EXPECT_EQ(h.get_gyro_status(), GYRO_BAD);
 }
 TEST(PositionHealth, NoFixOverridesRetainedRtkAndAccuracy) {
     health_message h;
-    double msg[16]={}; msg[8]=0.01; msg[15]=2;
+    double msg[16] = {}; msg[8] = 0.01; msg[15] = 2;
     h.add_gps_message(msg);
-    EXPECT_EQ(h.get_position_status(),POSITION_UNAVAILABLE);
+    EXPECT_EQ(h.get_position_status(), POSITION_UNAVAILABLE);
 }

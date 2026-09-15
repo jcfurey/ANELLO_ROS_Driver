@@ -1,3 +1,23 @@
+// Copyright (c) 2023 ANELLO Photonics
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 // Synthetic-data tests for the ASCII checksum, field parser, and bit
 // utilities, using the worked examples published in the ANELLO
 // Developer Manual as gold vectors.
@@ -7,22 +27,21 @@
 #include <cstring>
 #include <string>
 
-#include "../src/anello_ros_driver/bit_tools.h"
-
+#include "anello_ros_driver/bit_tools.h"
 TEST(ComputeChecksum, ManualGoldVectors)
 {
     // Every pair below appears verbatim in the ANELLO Developer Manual.
     const struct { const char *body; const char *ck; } vectors[] = {
-        {"APPNG", "48"},
-        {"APPNG,0", "54"},
-        {"APRST,0", "58"},
-        {"APODO,-,24", "7E"},
-        {"APODO,-24", "52"},
-        {"APODO,-,-24", "53"},
-        {"APVEH,R,bsl", "65"},
+    {"APPNG", "48"},
+    {"APPNG,0", "54"},
+    {"APRST,0", "58"},
+    {"APODO,-,24", "7E"},
+    {"APODO,-24", "52"},
+    {"APODO,-,-24", "53"},
+    {"APVEH,R,bsl", "65"},
     };
-    for (const auto &v : vectors) {
-        EXPECT_EQ(compute_checksum(v.body, static_cast<int>(strlen(v.body))),
+    for (const auto & v : vectors) {
+    EXPECT_EQ(compute_checksum(v.body, static_cast<int>(strlen(v.body))),
                   std::string(v.ck))
             << "body: " << v.body;
     }
@@ -47,11 +66,12 @@ TEST(Checksum, AcceptsValidFrameRejectsCorrupt)
 TEST(Checksum, SupportsCompleteRepliesAndRejectsMalformedBoundaries)
 {
     for (const std::string frame : {"#APPNG*48", "#APPNG*48\r", "#APPNG*48\r\n"}) {
-        EXPECT_NE(checksum(reinterpret_cast<const unsigned char *>(frame.data()), frame.size()), 0);
+    EXPECT_NE(checksum(reinterpret_cast<const unsigned char *>(frame.data()), frame.size()), 0);
     }
     for (const std::string frame : {"", "#", "#A", "APPNG*48\r\n", "#APPNG*49\r\n",
-                                   "#APPNG*48\n", "#APPNG*48X\r\n", "#APPNG*48\r\nX"}) {
-        EXPECT_EQ(checksum(reinterpret_cast<const unsigned char *>(frame.data()), frame.size()), 0);
+      "#APPNG*48\n", "#APPNG*48X\r\n", "#APPNG*48\r\nX"})
+  {
+    EXPECT_EQ(checksum(reinterpret_cast<const unsigned char *>(frame.data()), frame.size()), 0);
     }
 }
 
