@@ -107,7 +107,7 @@ Ethernet personality. On the ROS host (or any laptop):
 git clone https://github.com/Anello-Photonics/user_tool.git
 cd user_tool
 pip install -r requirements.txt
-python board_tools/user_program.py
+python3 user_program.py
 ```
 
 In the tool: **Connect → COM** (it auto-detects the config port), then
@@ -123,13 +123,17 @@ In the tool: **Connect → COM** (it auto-detects the config port), then
 | UDP Computer Port 2 (configuration) | `rport2` | `2222` (driver default `local_config_port`) |
 | UDP Computer Port 3 (odometer) | `rport3` | `3333` (driver default `local_odometer_port`) |
 | Message Format | `mfm` | `4` (RTCM binary, default — compact, full-rate; use `1`/ASCII only for debugging by eye) |
-| Output Data Rate (Hz) | `odr` | `100` or `200` (Ethernet supports 200; requires reset) |
+| Output Data Rate (Hz) | `odr` | `100` or `200` (match the unit/link; verify the active rate after configuration) |
 | Odometer Units | `odo` | `mps` (if you will feed wheel speed) |
 | Serial Output | `uart` | optional `off` once Ethernet is verified |
 
-Save to **flash** (the tool's save option / upper-case `W` writes), then
-reset the unit (the tool's reset, or `#APRST,0*58`). `odr`, baud, and
-sync changes only take effect after reset.
+The tool's Unit Configuration edits write these settings to **flash** using
+upper-case `W`. Its separate **Save Configs** menu exports a host-side text
+snapshot; it is not a flash-save command. RAM-only AHRS controls are handled
+separately by the tool. Restart the unit through **Restart Unit** when needed
+to activate stored changes, then read back the configuration. Activation and
+reconnection behavior must be checked for the unit's firmware; see the
+[vendor-tool comparison](user_tool_capability_comparison.md).
 
 Verify from the tool itself: **Connect → UDP**, enter the unit IP and
 the computer data/config ports (1111/2222) — if the tool connects and
@@ -190,7 +194,8 @@ What the driver does in ETH mode:
 
 - binds the three local UDP ports and addresses the unit at
   `remote_ip` ports 1/2/3 (data/config/odometer);
-- sends an `#APPNG` handshake on the config channel at startup;
+- initializes the UDP config endpoint without a startup `#APPNG` handshake;
+  use the command service to query the unit explicitly;
 - forwards `ntrip_client/rtcm` corrections to the **data** channel and
   `anello/odo` wheel speed to the dedicated **odometer** channel;
 - drops datagrams from any source other than `remote_ip`.
@@ -202,9 +207,10 @@ Recommended companion parameters for Ethernet operation:
   section). Newer firmware also offers PTP (`ptp` unit config) for
   hardware time sync if your network is PTP-capable.
 - NTRIP for RTK: add `ntrip_host`/`ntrip_mountpoint`/credentials launch
-  arguments; corrections flow host → unit over the data channel, so no
-  serial link is needed (leave the unit's own `ntrip` input channel
-  `off`/serial-default — the ROS client replaces it).
+  arguments; corrections flow host → unit over the data channel. The vendor
+  tool labels device `ntrip=2` as Ethernet input (`0` is off, `1` serial).
+  Verify the device's correction input selection and reception on the actual
+  firmware. The ROS caster client does not configure this device setting.
 
 ## 7. Vehicle configuration (lever arms)
 
