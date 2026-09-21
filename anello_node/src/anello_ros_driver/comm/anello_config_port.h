@@ -35,6 +35,7 @@ public:
   size_t get_data(char *buf, size_t size, int timeout_ms);
   bool write_data(const char *buf, size_t size);
   bool connected() const {return confirmed_;}
+  uint64_t truncated_datagrams() const {return ethernet_.truncated_datagrams();}
   std::string get_portname() const
   {
     return config_.type == ETH ? ethernet_.get_remote_ip() : uart_.get_portname();

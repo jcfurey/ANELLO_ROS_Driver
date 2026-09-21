@@ -5,8 +5,11 @@ provide the vendor tool's discovery, editing, export, or restart workflow.
 ROS parameter YAML configures the host driver; it does not apply settings to
 the ANELLO unit. A useful next step is a structured configuration interface
 over `anello/send_cmd`, with explicit RAM/flash selection and readback.
-This document compares capabilities and proposes that interface; it does not
-add a CLI, services, or automatic configuration at startup.
+This document records the baseline comparison and proposed sequence. The
+first discovery/export phase is now implemented: see the
+[read-only export guide](device_configuration_export.md). The tables below
+describe the baseline driver commit cited here; apply and action workflows
+remain proposed.
 
 ## Evidence and scope
 
@@ -46,7 +49,7 @@ Source references used below:
 
 ## Capability comparison
 
-| Capability | Vendor tool | Current ROS driver | Work needed for equivalent configuration support |
+| Capability | Vendor tool | Baseline ROS driver | Work needed for equivalent configuration support |
 |---|---|---|---|
 | Product, serial, version, hardware identity | Board queries including `APPID`, `APSER`, `APVER`, `APIHW`, `APFHW`, `APFSN` | Most available as raw replies through `send_cmd`; `APIHW` is outside the default read-only allowlist | Structured identity and raw-response capture; assess adding the documented `APIHW` query |
 | Discover supported unit settings | Reads all flash configuration, then probes RAM-only controls; UI offers fields returned by the device | Keyed `APCFG,r/R,...` reads allowed; keyless read-all rejected in read-only mode | Admit exact read-all forms and parse discovered keys without assuming a model-wide fixed list |
@@ -74,7 +77,7 @@ adds `#`, checksum, and CRLF.
 | Write flash | `APCFG,W,odr,100` | `APVEH,W,g1x,0.5,g1y,0,g1z,-0.3` |
 | Read all | `APCFG,r` / `APCFG,R` | `APVEH,R` |
 
-The read-all bodies have **no trailing comma**. The current ROS read-only
+The read-all bodies have **no trailing comma**. The baseline ROS read-only
 allowlist requires at least one key, so all three are blocked. The unrestricted
 mode can transmit them, but that is not a suitable prerequisite for discovery.
 
@@ -92,13 +95,15 @@ Clients must serialize and pace requests, check returned keys, and report
 ambiguous or incomplete results rather than treating a matching prefix as
 configuration success.
 
-There is also a transport limit to resolve before implementing bulk discovery:
-the service passes a 511-byte buffer limit to the UDP reader, which reserves
+The baseline also has a transport limit for bulk discovery:
+its service passes a 511-byte buffer limit to the UDP reader, which reserves
 one byte for termination. A configuration response exceeding **510 bytes in
 one UDP datagram is discarded**, not assembled across reads. Serial reads can
 accumulate fragments, subject to the service's bounded response buffer. Bulk
 read support needs a bounded whole-datagram receive path and tests for realistic
-full configuration responses as well as oversized input.
+full configuration responses as well as oversized input. The implemented
+export phase resolves this with a 4096-byte reply limit and explicit oversize
+errors; see the export guide for the current behavior.
 
 ## Device settings that must agree with ROS
 
@@ -163,7 +168,7 @@ may return `APERR`; preserve that reply instead of substituting defaults.
 
 ## Proposed implementation sequence
 
-1. **Discovery and export:** support documented read-all queries under the
+1. **Discovery and export (implemented):** support documented read-all queries under the
    read-only policy, resolve UDP reply sizing, then capture identity and
    supported unit RAM, unit flash, and vehicle flash settings. Include raw
    checksum-verified replies, timestamps, unsupported/error results, driver

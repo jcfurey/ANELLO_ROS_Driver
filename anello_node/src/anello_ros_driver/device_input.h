@@ -71,7 +71,7 @@ inline bool valid_command_body(const std::string & body)
 inline bool read_only_command(const std::string & body)
 {
   if (!valid_command_body(body)) {return false;}
-  const auto queries = {"APPNG", "APVER", "APSER", "APSTA", "APPID", "APFSN", "APFHW"};
+  const auto queries = {"APPNG", "APVER", "APSER", "APSTA", "APPID", "APFSN", "APFHW", "APIHW"};
   if (std::any_of(queries.begin(), queries.end(), [&body](const char *name){
       return body == name;
       }))
@@ -79,6 +79,9 @@ inline bool read_only_command(const std::string & body)
     return true;
   }
   if (body.rfind("APECH,", 0) == 0) {return true;}
+  // Vendor read-all forms have no trailing comma. Vehicle RAM discovery
+  // is not documented by the vendor API, so keep that form disallowed.
+  if (body == "APCFG,r" || body == "APCFG,R" || body == "APVEH,R") {return true;}
   if (body.rfind("APCFG,", 0) != 0 && body.rfind("APVEH,", 0) != 0) {return false;}
   if (body.size() < 9 || (body[6] != 'r' && body[6] != 'R') || body[7] != ',') {return false;}
   size_t start = 8;

@@ -62,6 +62,7 @@
 #include "anello_interfaces/msg/apodo.hpp"
 #include "anello_interfaces/srv/cmd_and_rsp.hpp"
 #include "anello_ros_driver/bit_tools.h"
+#include "anello_ros_driver/build_info.h"
 #include "anello_ros_driver/clock_translator.h"
 #include "anello_ros_driver/comm/anello_config_port.h"
 #include "anello_ros_driver/comm/anello_data_port.h"
@@ -196,6 +197,11 @@ private:
         pd.read_only = true;
         return pd;
       };
+
+    declare_parameter("driver_build_revision", std::string(ANELLO_BUILD_REVISION),
+            d("Git revision at build configuration; -dirty marks local changes"), true);
+    declare_parameter("driver_build_source_sha256", std::string(ANELLO_BUILD_SOURCE_SHA256),
+            d("SHA-256 of configured C++ sources, headers, and package/build definitions"), true);
 
     declare_parameter("com_type", "UART",
             d("Communication type: UART or ETH"));
@@ -635,8 +641,10 @@ private:
       res->response = "ERROR: config port not available";
       return;
     }
-    constexpr int kMaxResp = 512;
-    char read_buf[kMaxResp];
+    // Receive a whole bounded UDP reply, including the reader's terminator
+    // allowance. UART fragments use the same maximum framed-line length.
+    constexpr size_t kMaxResp = 4096;
+    char read_buf[kMaxResp + 2];
     std::string response;
 
     std::string body = req->command;
@@ -665,7 +673,7 @@ private:
         // APODO acks on the shared UART) so they can't be returned as
         // this command's response; bounded in case the port is streaming.
     for (int i = 0;
-      i < 32 && config_port_->get_data(read_buf, kMaxResp - 1, 0) > 0;
+      i < 32 && config_port_->get_data(read_buf, kMaxResp + 1, 0) > 0;
       ++i)
     {
     }
@@ -680,15 +688,24 @@ private:
 
     auto start = std::chrono::steady_clock::now();
     auto timeout = std::chrono::milliseconds(500);
+    const auto truncated_before = config_port_->truncated_datagrams();
 
         // Bounded reads keep the response wait near its 500 ms budget.
     while (std::chrono::steady_clock::now() - start < timeout) {
-      int n = static_cast<int>(config_port_->get_data(read_buf, kMaxResp - 1, 20));
+      int n = static_cast<int>(config_port_->get_data(read_buf, kMaxResp + 1, 20));
+      if (config_port_->truncated_datagrams() != truncated_before) {
+        res->response = "ERROR: configuration UDP reply exceeds 4096 bytes";
+        return;
+      }
       if (n > 0) {
         read_buf[n] = '\0';
         response.append(read_buf, n);
         auto end = response.find("\r\n");
         while (end != std::string::npos) {
+          if (end + 2 > kMaxResp) {
+            res->response = "ERROR: configuration response line exceeds 4096 bytes";
+            return;
+          }
           auto line = response.substr(0, end + 2);
           response.erase(0, end + 2);
           if ((line.rfind("#" + identifier + ",", 0) == 0 || line.rfind("#" + identifier + "*",
@@ -700,7 +717,10 @@ private:
           }
           end = response.find("\r\n");
         }
-        if (response.size() > 4096) {response.clear();}
+        if (response.size() > kMaxResp) {
+          res->response = "ERROR: configuration response line exceeds 4096 bytes";
+          return;
+        }
       }
     }
 

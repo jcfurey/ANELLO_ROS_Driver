@@ -132,10 +132,10 @@ size_t ethernet_interface::get_data(char *buf, size_t buf_len)
   if (n < 0) {
     return 0;
   }
-  if (static_cast<size_t>(n) >= buf_len) {++truncated_; return 0;}
   if (srcaddr.sin_addr.s_addr != this->cliaddr.sin_addr.s_addr) {
     return 0;
   }
+  if (static_cast<size_t>(n) >= buf_len) {++truncated_; return 0;}
   buf[n] = '\0';
   return static_cast<size_t>(n);
 }

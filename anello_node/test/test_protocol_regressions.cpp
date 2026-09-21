@@ -108,11 +108,13 @@ TEST(DeviceInput, RtcmValidatesWholeBundlesBeforeAnyTransmission) {
     EXPECT_FALSE(valid_rtcm_input(nullptr, 8));
 }
 TEST(DeviceInput, QueriesCannotSmuggleConfigurationOrResetCommands) {
-    for (const auto body : {"APPNG", "APVER", "APVEH,R,bsl", "APCFG,r,odr,mfm", "APECH,hello"}) {
+    for (const auto body : {"APPNG", "APVER", "APIHW", "APVEH,R,bsl", "APCFG,r,odr,mfm",
+      "APCFG,r", "APCFG,R", "APVEH,R", "APECH,hello"})
+  {
     EXPECT_TRUE(read_only_command(body)) << body;
 }
     for (const auto body : {"AP", "APVER,0", "APCFG,W,odr,100", "APVEH,w,bsl,1", "APRST,0",
-      "APUNKNOWN",
+      "APUNKNOWN", "APIHW,0", "APCFG,w", "APCFG,W", "APVEH,W", "APVEH,r", "APCFG,Rfoo",
       "APCFG,R,", "APCFG,R,bsl,", "APCFG,R,,bsl", "APCFG,R,bsl;APRST", "APPNG\r\nAPRST,0"})
   {
     EXPECT_FALSE(read_only_command(body)) << body;

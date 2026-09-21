@@ -43,6 +43,39 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(diagnostic_updater REQUIRED)
 
+# Capture the configured source identity in the running node, rather than
+# guessing its revision from the export client's checkout.
+find_package(Git QUIET)
+set(ANELLO_BUILD_REVISION "unknown")
+if(GIT_FOUND)
+  execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE ANELLO_GIT_HEAD OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(ANELLO_GIT_HEAD MATCHES "^[0-9a-f]+$")
+    set(ANELLO_BUILD_REVISION "${ANELLO_GIT_HEAD}")
+    execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      OUTPUT_VARIABLE ANELLO_GIT_CHANGES ERROR_QUIET)
+    if(ANELLO_GIT_CHANGES)
+      string(APPEND ANELLO_BUILD_REVISION "-dirty")
+    endif()
+  endif()
+endif()
+file(GLOB_RECURSE ANELLO_BUILD_INPUTS CONFIGURE_DEPENDS
+  RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" "src/*.cpp" "src/*.h")
+list(APPEND ANELLO_BUILD_INPUTS CMakeLists.txt package.xml cmake/build_info.h.in)
+list(SORT ANELLO_BUILD_INPUTS)
+set(ANELLO_BUILD_HASHES "")
+foreach(input IN LISTS ANELLO_BUILD_INPUTS)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/${input}")
+  file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${input}" input_hash)
+  string(APPEND ANELLO_BUILD_HASHES "${input}:${input_hash}\n")
+endforeach()
+string(SHA256 ANELLO_BUILD_SOURCE_SHA256 "${ANELLO_BUILD_HASHES}")
+configure_file(cmake/build_info.h.in
+  generated/anello_ros_driver/build_info.h @ONLY)
+
 set(DRIVER_SOURCES
   src/anello_ros_driver/main_anello_ros_driver.cpp
   src/anello_ros_driver/bit_tools.cpp
@@ -58,7 +91,8 @@ set(DRIVER_SOURCES
 
 # Shared library for component loading
 add_library(anello_ros_driver_component SHARED ${DRIVER_SOURCES})
-target_include_directories(anello_ros_driver_component PRIVATE src)
+target_include_directories(anello_ros_driver_component PRIVATE src
+  "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(anello_ros_driver_component PUBLIC
   rclcpp::rclcpp
   rclcpp_components::component
@@ -108,6 +142,9 @@ install(
   DESTINATION share/${PROJECT_NAME}/
 )
 
+install(PROGRAMS scripts/anello_config.py
+  DESTINATION lib/${PROJECT_NAME} RENAME anello_config)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_cppcheck_LANGUAGE c++)
@@ -116,6 +153,8 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_ros_regressions test/test_ros_regressions.py TIMEOUT 120)
+  ament_add_pytest_test(test_config_export test/test_config_export.py TIMEOUT 30)
+  ament_add_pytest_test(test_config_export_ros test/test_config_export_ros.py TIMEOUT 120)
 
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_anello_decoding

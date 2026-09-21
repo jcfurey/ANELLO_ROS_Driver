@@ -148,6 +148,12 @@ NTRIP starts even when the caster is unavailable and retries indefinitely. Defau
 
 Commands accept a 5..128-byte body such as `APVEH,R,bsl`; the driver adds framing/checksum and returns a checksum-verified reply with the matching message identifier (or APERR). `command_mode=read_only` is the default. Start with `command_mode:=unrestricted` only when intentionally configuring or resetting the device. Commands are limited to two per second. The response wait is bounded to 500 ms; an explicitly permitted `APRST,0` returns `SENT` without claiming acknowledgement, because that command has no reply. The driver never retries it automatically. Concurrent identical unsolicited responses cannot be correlated more precisely because the protocol has no transaction ID. `InitHeading`/`UpdHeading` interfaces remain for source compatibility but have no advertised service; use documented device commands through `send_cmd`.
 
-The [vendor-tool capability comparison](doc/user_tool_capability_comparison.md) maps device settings to ROS parameters and documents the remaining work for configuration discovery, export, application, and readback. ROS parameter files configure the host driver; they do not write device settings.
+Export a read-only device snapshot through the running driver:
+
+```bash
+ros2 run anello_ros_driver anello_config export --output anello-device.json
+```
+
+The [export guide](doc/device_configuration_export.md) describes RAM/flash capture, raw replies, host parameters, namespaced drivers, and partial-result exit codes. The [vendor-tool capability comparison](doc/user_tool_capability_comparison.md) maps device settings to ROS parameters and describes the later application/readback workflow. ROS parameter files configure the host driver; they do not write device settings.
 
 See [integration](doc/integration_guide.md), [hardware validation](doc/hardware_validation_checklist.md), [Ethernet setup](doc/ethernet_setup_guide.md), and [the EVK reference](doc/anello_evk_reference.md).

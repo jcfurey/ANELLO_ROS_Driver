@@ -27,8 +27,8 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ntrip_client</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>
-  <test_depend>rclpy</test_depend>
   <test_depend>rosgraph_msgs</test_depend>
   <test_depend>tf2_msgs</test_depend>
   <test_depend>diagnostic_msgs</test_depend>
